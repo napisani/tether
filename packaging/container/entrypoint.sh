@@ -51,6 +51,10 @@ require_env DBUS_SYSTEM_BUS_ADDRESS unix:path=/host/run/dbus/system_bus_socket
 require_env DBUS_SESSION_BUS_ADDRESS unix:path=/run/tether-runtime/bus
 require_env TETHER_LOG_STDERR 1
 require_env TETHER_NO_AUTOSTART 1
+[[ ${TETHER_WEB_ENABLED:-1} =~ ^[01]$ ]] || fail 'invalid-layout: TETHER_WEB_ENABLED must be 0 or 1'
+if [[ ${TETHER_WEB_ENABLED:-1} == 1 ]]; then
+    [[ -n ${TETHER_WEB_ALLOWED_HOSTS:-} ]] || fail 'invalid-layout: TETHER_WEB_ALLOWED_HOSTS is required'
+fi
 # Never accidentally attach to a desktop inherited through operator environment overrides.
 unset DISPLAY WAYLAND_DISPLAY
 
@@ -102,6 +106,11 @@ wait_ready org.bluez.obex obex
 printf 'tether-container: session bus and OBEX ready; starting tetherd\n' >&2
 tetherd &
 children+=("$!")
+if [[ ${TETHER_WEB_ENABLED:-1} == 1 ]]; then
+    printf 'tether-container: starting web interface on %s\n' "$TETHER_WEB_LISTEN" >&2
+    tether-web &
+    children+=("$!")
+fi
 status=0
 wait -n "${children[@]}" || status=$?
 fail "child-exited: a supervised process exited ($status); stopping its siblings"

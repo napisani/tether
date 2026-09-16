@@ -10,9 +10,20 @@ release:
 	cmake --build --preset release
 	ln -sf build/release/compile_commands.json
 
-test: debug
+test: debug web-test
 	ctest --test-dir build/debug --output-on-failure
 	cd extension && npm test
+
+.PHONY: web web-test web-e2e
+web: web-test
+	cd web && go build ./cmd/tether-web
+
+web-test:
+	cd web/ui && npm ci && npm test && npm run build
+	cd web && go test ./...
+
+web-e2e:
+	cd web/ui && npm ci && npm run test:e2e
 
 install: release
 	sudo cmake --install build/release

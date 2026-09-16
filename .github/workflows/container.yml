@@ -10,6 +10,31 @@ permissions:
   contents: read
 
 jobs:
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/ui/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: web/go.mod
+      - name: Test gateway
+        working-directory: web
+        run: go test ./...
+      - name: Test browser UI
+        working-directory: web/ui
+        run: |
+          npm ci
+          npm test
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+
   container:
     strategy:
       fail-fast: false

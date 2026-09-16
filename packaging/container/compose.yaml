@@ -18,6 +18,7 @@ services:
     environment:
       TETHER_BLUEZ_EXPERIMENTAL: ${TETHER_BLUEZ_EXPERIMENTAL:?Confirm host bluetoothd uses experimental APIs}
       TETHER_BLUEZ_SECURE_CONNECTIONS: ${TETHER_BLUEZ_SECURE_CONNECTIONS:?Confirm host Secure Connections is enabled}
+      TETHER_WEB_ALLOWED_HOSTS: ${TETHER_WEB_ALLOWED_HOSTS:?Set the browser hostnames allowed to reach Tether}
     volumes:
       - type: bind
         source: ${TETHER_DATA_DIR:?Set an absolute private host data directory}
