@@ -1,6 +1,39 @@
 import { describe, expect, it } from "vitest";
 import { initialState, reduceAppState } from "./state";
 
+describe("device discovery", () => {
+  it("keeps an unpaired Apple nearby candidate before iPhone services resolve", () => {
+    const state = reduceAppState(initialState, {
+      type: "daemon-event",
+      event: {
+        command: "bt_devices",
+        devices: [
+          {
+            address: "40:F6:64:3D:7A:F1",
+            name: "40-F6-64-3D-7A-F1",
+            iphone: false,
+            apple_nearby: true,
+            paired: false,
+            bonded: false,
+            trusted: false,
+            connected: false,
+            classic_connected: false,
+            le_bearer: true,
+            le_bonded: false,
+            le_connected: false,
+            map: false,
+            pbap: false,
+            ancs: false,
+            ancs_notifying: false,
+          },
+        ],
+      },
+    });
+
+    expect(state.devices).toHaveLength(1);
+  });
+});
+
 describe("pairing state", () => {
   it("follows one pairing operation from discovery through confirmation", () => {
     let state = reduceAppState(initialState, {
