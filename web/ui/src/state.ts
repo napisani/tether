@@ -109,7 +109,7 @@ function reduceDaemonEvent(state: AppState, event: DaemonEvent): AppState {
     case "bt_status":
       return { ...state, bluetooth: event as BluetoothStatusEvent };
     case "bt_devices":
-      return { ...state, devices: event.devices.filter((device) => device.iphone) };
+      return { ...state, devices: event.devices.filter((device) => device.iphone || device.apple_nearby) };
     case "bt_connection_changed":
       return { ...state, connection: event as BluetoothConnectionEvent };
     case "bt_scan_result":

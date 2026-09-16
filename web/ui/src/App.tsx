@@ -172,8 +172,8 @@ export function AppView({
                 >
                   <span className="device-glyph" aria-hidden="true">▯</span>
                   <span className="device-copy">
-                    <strong>{device.name || "iPhone"}</strong>
-                    <small>{device.bonded ? "Paired" : "Ready to pair"}</small>
+                    <strong>{deviceDisplayName(device)}</strong>
+                    <small>{device.bonded ? "Paired" : device.iphone ? "Ready to pair" : "Possible iPhone"}</small>
                   </span>
                   <span className={`row-dot ${device.connected ? "online" : ""}`} aria-hidden="true" />
                 </button>
@@ -219,7 +219,7 @@ export function AppView({
       )}
       {forgetAddress && (
         <ConfirmForgetDialog
-          name={state.devices.find((device) => device.address === forgetAddress)?.name || "this iPhone"}
+          name={deviceDisplayName(state.devices.find((device) => device.address === forgetAddress))}
           onCancel={() => setForgetAddress(undefined)}
           onConfirm={() => {
             onUnpair(forgetAddress);
@@ -252,8 +252,8 @@ function DeviceDetail({
     <div className="device-detail">
       <div className="detail-heading">
         <div>
-          <span className="eyebrow">Selected iPhone</span>
-          <h2>{device.name || "iPhone"}</h2>
+          <span className="eyebrow">{device.iphone ? "Selected iPhone" : "Possible iPhone"}</span>
+          <h2>{deviceDisplayName(device)}</h2>
           <p className="address">{device.address}</p>
         </div>
         <span className={`connection-pill ${device.connected ? "connected" : ""}`}>
@@ -361,6 +361,15 @@ function ConfirmForgetDialog({ name, onCancel, onConfirm }: { name: string; onCa
       </section>
     </div>
   );
+}
+
+function deviceDisplayName(device?: AppState["devices"][number]): string {
+  if (!device) return "this iPhone";
+  const addressAlias = device.address.replaceAll(":", "-");
+  if (device.apple_nearby && (!device.name || device.name.toUpperCase() === addressAlias)) {
+    return "Nearby Apple device";
+  }
+  return device.name || "iPhone";
 }
 
 function CapabilityCard({ label, detail, active }: { label: string; detail: string; active: boolean }) {
