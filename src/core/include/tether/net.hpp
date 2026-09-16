@@ -38,6 +38,10 @@ namespace tether {
     void record_received_file(const std::filesystem::path& path, size_t bytes_written);
     size_t broadcast_tcp_message(const std::string& msg, int exclude_fd = -1);
 
+    // Versioned control-protocol features. Clients use this to hide unsupported
+    // controls instead of guessing from the daemon version.
+    nlohmann::json build_protocol_info();
+
     // Bluetooth state, read from the BluezMonitor snapshot.
     nlohmann::json build_bt_status();
     nlohmann::json build_bt_devices();

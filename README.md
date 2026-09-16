@@ -30,6 +30,7 @@
 | **iOS App** | ✅ Stable |
 | **Browser Extension** | ✅ Stable |
 | **Mail Extension** | ✅ Stable |
+| **Container Web Pairing** | 🧪 Beta |
 | **Messages (SMS/iMessage)** | ✅ Stable |
 | **Notification Mirroring** | 🧪 Beta |
 | **Phone Calls** (PipeWire only) | 🧪 Alpha |
@@ -200,9 +201,10 @@ adapter or multiple adapters, change `bluetooth.adapters` accordingly.
 ### Container (local build)
 
 A headless Linux Docker deployment is available for amd64 and arm64. It runs
-`tetherd` and its session services as non-root, using the host's BlueZ/Avahi and
-persistent state/download mounts. Pair and send messages/files through the CLI;
-there is no web UI yet. Bluetooth messaging still needs the iPhone near the host.
+`tetherd`, a guided pairing/status web interface, and its session services as
+non-root, using the host's BlueZ/Avahi and persistent state/download mounts. The
+CLI remains available for messaging and file operations not yet exposed in the
+web interface. Bluetooth messaging still needs the iPhone near the host.
 
 See [docs/CONTAINER.md](docs/CONTAINER.md) for prerequisites, Compose setup,
 security considerations and the real-iPhone acceptance checklist. No registry

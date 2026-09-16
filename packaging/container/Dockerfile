@@ -1,4 +1,20 @@
 # syntax=docker/dockerfile:1
+FROM node:24-bookworm-slim AS web-ui
+WORKDIR /src/web/ui
+COPY web/ui/package.json web/ui/package-lock.json ./
+RUN npm ci
+COPY web/ui/ ./
+RUN npm test && npm run build
+
+FROM golang:1.26-bookworm AS web-build
+WORKDIR /src/web
+COPY web/go.mod ./
+COPY web/internal/ ./internal/
+COPY web/cmd/ ./cmd/
+COPY --from=web-ui /src/web/cmd/tether-web/dist/ ./cmd/tether-web/dist/
+RUN CGO_ENABLED=0 go test ./... \
+    && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /tether-web ./cmd/tether-web
+
 FROM ubuntu:24.04 AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ cmake ninja-build git pkg-config ca-certificates \
@@ -41,6 +57,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chown 1000:1000 /data /downloads /run/tether-runtime \
     && chmod 700 /data /downloads /run/tether-runtime
 COPY --from=build /payload/ /usr/local/
+COPY --from=web-build /tether-web /usr/local/bin/tether-web
 COPY --chmod=755 packaging/container/entrypoint.sh /usr/local/libexec/tether-container-entrypoint
 COPY --chmod=755 packaging/container/healthcheck.sh /usr/local/libexec/tether-container-healthcheck
 RUN ldd /usr/local/bin/tether /usr/local/bin/tetherd > /tmp/linked-libraries \
@@ -55,7 +72,10 @@ ENV HOME=/data \
     DBUS_SYSTEM_BUS_ADDRESS=unix:path=/host/run/dbus/system_bus_socket \
     DBUS_SESSION_BUS_ADDRESS=unix:path=/run/tether-runtime/bus \
     TETHER_LOG_STDERR=1 \
-    TETHER_NO_AUTOSTART=1
+    TETHER_NO_AUTOSTART=1 \
+    TETHER_WEB_ENABLED=1 \
+    TETHER_WEB_LISTEN=0.0.0.0:5135 \
+    TETHER_WEB_ALLOWED_HOSTS=localhost
 USER 1000:1000
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=6s --start-period=30s --retries=3 \
