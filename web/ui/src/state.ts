@@ -53,7 +53,12 @@ export function reduceAppState(state: AppState, action: AppAction): AppState {
     case "gateway-connected":
       return { ...state, gatewayConnected: action.connected };
     case "scan-started":
-      return { ...state, scanning: true, scanMessage: "Looking for nearby iPhones…" };
+      return {
+        ...state,
+        devices: state.devices.filter((device) => !isAnonymousCandidate(device)),
+        scanning: true,
+        scanMessage: "Looking for nearby iPhones…",
+      };
     case "pair-started":
       return {
         ...state,
@@ -108,8 +113,11 @@ function reduceDaemonEvent(state: AppState, event: DaemonEvent): AppState {
       return { ...state, protocol: event as ProtocolInfoEvent };
     case "bt_status":
       return { ...state, bluetooth: event as BluetoothStatusEvent };
-    case "bt_devices":
-      return { ...state, devices: event.devices.filter((device) => device.iphone || device.apple_nearby) };
+    case "bt_devices": {
+      const visible = event.devices.filter((device) => device.iphone || device.apple_nearby);
+      const remembered = state.devices.filter(isAnonymousCandidate);
+      return { ...state, devices: mergeDevices(remembered, visible) };
+    }
     case "bt_connection_changed":
       return { ...state, connection: event as BluetoothConnectionEvent };
     case "bt_scan_result":
@@ -153,6 +161,18 @@ function reduceDaemonEvent(state: AppState, event: DaemonEvent): AppState {
     default:
       return state;
   }
+}
+
+function isAnonymousCandidate(device: BluetoothDevice): boolean {
+  return Boolean(device.apple_nearby && !device.paired && !device.bonded);
+}
+
+function mergeDevices(...groups: BluetoothDevice[][]): BluetoothDevice[] {
+  const devices = new Map<string, BluetoothDevice>();
+  for (const group of groups) {
+    for (const device of group) devices.set(device.address, device);
+  }
+  return [...devices.values()];
 }
 
 function belongsToActivePairing(pairing: PairingState, operationId?: string): boolean {
