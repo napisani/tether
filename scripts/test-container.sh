@@ -97,14 +97,21 @@ docker exec "$app" bash -ec '
     [[ $TETHER_NO_AUTOSTART == 1 && $TETHER_LOG_STDERR == 1 ]]
     test ! -e /usr/local/bin/tether-gtk
     test ! -e /usr/local/bin/tether-dialog
+    test -x /usr/local/bin/tether-web
     test ! -e /usr/share/dbus-1/services/org.bluez.obex.service
     test -f /usr/local/share/locale/fr/LC_MESSAGES/tether.mo
     ! command -v g++
     ! command -v npm
+    ! command -v node
+    ! command -v go
     ! ldd /usr/local/bin/tether /usr/local/bin/tetherd | grep "not found"
     test ! -e /data/.local/state/tether/tetherd.log
     [[ $(stat -c %a /data) == 700 ]]
     [[ $(stat -c %a /run/tether-runtime) == 700 ]]
+    exec 3<>/dev/tcp/127.0.0.1/5135
+    printf "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3
+    grep -q "<title>Tether</title>" <&3
+    exec 3>&- 3<&-
 '
 docker logs "$app" 2>&1 | grep 'tetherd version' >/dev/null
 # No connected remote peer; this only creates synthetic local trust in this disposable home.
@@ -140,7 +147,7 @@ done
 printf 'PASS: stuck daemon/bus fail bounded health without restarting the runtime\n'
 
 # Each critical child is owned by this test container. Killing it must stop its siblings.
-for name in tetherd tether-obexd dbus-daemon; do
+for name in tetherd tether-web tether-obexd dbus-daemon; do
     start
     ready
     signal_child "$name" KILL

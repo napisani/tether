@@ -1,7 +1,10 @@
 # Tether in a container
 
-The container runs `tetherd`, a private session D-Bus, and `obexd`. Drive it with
-`docker compose exec tether tether ...`; there is **no web UI in this image**.
+The container runs `tetherd`, the `tether-web` browser gateway, a private
+session D-Bus, and `obexd`. Use the web interface for guided Bluetooth pairing
+and current connection status; the CLI remains available through
+`docker compose exec tether tether ...`. See [WEB_UI.md](WEB_UI.md) for the
+transport contract and the feature-drift rules used by future web work.
 
 This is a local-build option, not a published registry image. Automated tests
 cover the image and headless behavior; a real iPhone/Bluetooth validation is
@@ -11,8 +14,8 @@ still required for a particular host. See the acceptance checklist below.
 
 | Host Linux machine | Container |
 |---|---|
-| Bluetooth adapter and BlueZ (`bluetoothd`), including Bluetooth bonds | Non-root `tetherd` and CLI |
-| Avahi/mDNS, firewall, system D-Bus | Private session D-Bus and foreground OBEX daemon |
+| Bluetooth adapter and BlueZ (`bluetoothd`), including Bluetooth bonds | Non-root `tetherd`, `tether-web`, and CLI |
+| Avahi/mDNS, firewall, system D-Bus, HTTPS/ingress when used | Private session D-Bus and foreground OBEX daemon |
 | Persistent directories owned by your chosen user | Keys/config/history in `/data`, received files in `/downloads` |
 
 Wi-Fi pairing and file transfer use the Tether iPhone app. **SMS/iMessage needs
@@ -33,8 +36,10 @@ needs a Wayland session and is not available here.
    the host before pairing**, then enable the iPhone's Messages/Contacts permissions.
    Upstream currently recommends BlueZ 5.86+ on the host; the Ubuntu 24.04 image
    has its own packaged OBEX client (currently 5.72). Record both versions when testing.
-2. Run Avahi and the system bus on the host. Open inbound 5134/tcp and mDNS
-   5353/udp on the trusted local network; see the README's firewall instructions.
+2. Run Avahi and the system bus on the host. Open inbound 5134/tcp, the web
+   interface on 5135/tcp, and mDNS 5353/udp only on the trusted local network;
+   see the README's firewall instructions. Prefer an HTTPS reverse proxy or
+   Kubernetes ingress in front of port 5135.
 3. Verify the host settings, then set `TETHER_BLUEZ_SECURE_CONNECTIONS=1` in
    the container environment. Tether can detect BlueZ's experimental API over
    D-Bus, but the container cannot run host management tools to inspect the
@@ -76,6 +81,9 @@ Edit `packaging/container/.env`:
   It is the advertised display name; the persisted certificate is the identity.
 - Leave `TETHER_BLUEZ_SECURE_CONNECTIONS=1` only after checking that the host
   controller meets that prerequisite. Set it to `0` when the capability is absent.
+- Set `TETHER_WEB_ALLOWED_HOSTS` to the comma-separated hostnames used in browser
+  URLs, for example `tether.home.example,localhost`. Requests carrying any other
+  `Host` header are rejected.
 
 The entrypoint refuses wrong ownership or a non-private data directory rather
 than recursively changing your files. Existing directories must already be
@@ -104,9 +112,30 @@ specific architecture with Docker's `--platform linux/amd64` or
 No build or workflow pushes an image to a registry.
 
 The reference deployment uses host networking, so Docker port mappings do not
-apply: `tetherd` listens on host port 5134. Limit access with the host firewall.
-Only the existing mTLS phone/peer endpoint listens on TCP; the local control
-socket is **not** exposed on the network.
+apply: `tetherd` listens on host port 5134 and `tether-web` on 5135. Limit both
+with the host firewall. The browser gateway is intentionally unauthenticated for
+trusted-LAN deployments. It rejects unrecognized hosts, cross-origin mutations,
+cross-site browser requests, non-JSON commands, and all CORS access, but it does
+not protect against another actor already on that LAN. Put HTTPS ingress in front
+of it and do not expose port 5135 to the public internet.
+
+The gateway translates HTTP commands and server-sent events to the existing
+newline-delimited JSON protocol over `/run/tether-runtime/tether/tetherd.sock`.
+The Unix socket itself is **not** exposed on the network, and the gateway contains
+no Bluetooth or pairing policy.
+
+## Pair in the web interface
+
+Open `http://<host>:5135` (or the configured HTTPS ingress), choose **Scan for
+iPhone**, select the phone, and choose **Pair over Bluetooth**. Keep the iPhone
+unlocked on Settings → Bluetooth. Tether displays the numeric comparison code in
+a focused dialog; choose **Codes match** only when every digit matches the phone.
+The interface then reports Classic, Low Energy, Messages, Contacts, and
+Notifications independently from live daemon state.
+
+Pairing remains a host Bluetooth operation. The web page cannot bypass the
+phone's confirmation, approve a mismatched code, or make a remote adapter behave
+as if it were near the phone.
 
 ## Pair and use the CLI
 
@@ -196,13 +225,14 @@ requires handling that host's bonds separately.
   and a read-only root filesystem. The image uses `tini` and a supervisor script,
   not systemd.
 - The supervisor checks the host bus, starts its session bus and OBEX with bounded
-  readiness waits, then starts `tetherd`. If any managed child exits, its siblings
-  are terminated and the container exits nonzero.
+  readiness waits, then starts `tetherd` and `tether-web`. If any managed child
+  exits, its siblings are terminated and the container exits nonzero.
 - SIGTERM stops the children within the 15-second Compose grace period. Docker
   manages restart/backoff (`unless-stopped`); permanent setup errors remain
   visible in logs rather than gaining permissions automatically.
-- Health checks ask the existing daemon for status and check session-bus/OBEX
-  presence. They never spawn `tetherd`, activate OBEX, send messages or pair a
+- Health checks ask the existing daemon for status, check session-bus/OBEX
+  presence, and require the web gateway to be connected to the daemon. They never
+  spawn `tetherd`, activate OBEX, send messages or pair a
   device. A missing phone, powered-off adapter or missing mDNS does not by itself
   fail liveness. A hung daemon/bus causes the probe to fail within five seconds.
 - Docker does **not** restart a still-running container just because it is
@@ -215,6 +245,10 @@ These environment switches are also usable outside Docker:
 | `TETHER_LOG_STDERR` | `1` | Keep daemon stderr attached to its supervisor |
 | `TETHER_NO_AUTOSTART` | `1` | Prevent CLI/client helpers from spawning `tetherd` |
 | `TETHER_BLUEZ_SECURE_CONNECTIONS` | Boolean (`1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off`) | Declare whether the host controller has Secure Connections enabled |
+| `TETHER_WEB_ENABLED` | `1` or `0` | Start or omit the supervised browser gateway; defaults to `1` in the image |
+| `TETHER_WEB_LISTEN` | Address such as `0.0.0.0:5135` | Browser gateway listen address |
+| `TETHER_WEB_ALLOWED_HOSTS` | Comma-separated hostnames | Required for wildcard listening; rejects unexpected Host headers |
+| `TETHER_SOCKET_PATH` | Unix-socket path | Override the gateway-to-daemon socket only for nonstandard packaging/testing |
 
 Unset runtime switches preserve normal behavior. The local `btmgmt` result takes
 precedence when available; the capability declaration is used only when that probe
@@ -263,8 +297,9 @@ The test stage runs GTest/CTest as non-root. The smoke script creates disposable
 volumes and a private stand-in system bus, never mounts host services or touches
 a real adapter. It tests supervised child failures, bounded health, restart
 persistence including a nonempty encrypted journal, volume ownership and
-permission constraints. Its root initialization command only prepares its own
-throwaway volumes; the tested runtime remains non-root. Traps clean up test
+permission constraints, the embedded web UI, HTTP readiness, and supervised web
+process failure. Its root initialization command only prepares its own throwaway
+volumes; the tested runtime remains non-root. Traps clean up test
 containers and volumes on exit.
 
 `.github/workflows/container.yml` runs this on native amd64 and arm64 Linux
