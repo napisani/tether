@@ -6,9 +6,10 @@ import { fileURLToPath } from "node:url";
 const dist = fileURLToPath(new URL("../../cmd/tether-web/dist", import.meta.url));
 const clients = new Set();
 const phone = {
-  address: "38:9C:B2:42:3F:E7",
-  name: "Nick’s iPhone",
-  iphone: true,
+  address: "40:F6:64:3D:7A:F1",
+  name: "40-F6-64-3D-7A-F1",
+  iphone: false,
+  apple_nearby: true,
   paired: false,
   bonded: false,
   trusted: false,
@@ -17,9 +18,9 @@ const phone = {
   le_bearer: true,
   le_bonded: false,
   le_connected: false,
-  map: true,
-  pbap: true,
-  ancs: true,
+  map: false,
+  pbap: false,
+  ancs: false,
   ancs_notifying: false,
 };
 
@@ -52,6 +53,8 @@ const durable = {
 
 function reset() {
   Object.assign(phone, {
+    name: "40-F6-64-3D-7A-F1",
+    iphone: false,
     paired: false,
     bonded: false,
     trusted: false,
@@ -59,6 +62,9 @@ function reset() {
     classic_connected: false,
     le_bonded: false,
     le_connected: false,
+    map: false,
+    pbap: false,
+    ancs: false,
     ancs_notifying: false,
   });
   durable.bt_status.device_address = "";
@@ -107,6 +113,8 @@ function handleCommand(command) {
   if (command.command === "bt_pair_confirm" && command.accept) {
     setTimeout(() => {
       Object.assign(phone, {
+        name: "Nick’s iPhone",
+        iphone: true,
         paired: true,
         bonded: true,
         trusted: true,
@@ -114,6 +122,9 @@ function handleCommand(command) {
         classic_connected: true,
         le_bonded: true,
         le_connected: true,
+        map: true,
+        pbap: true,
+        ancs: true,
         ancs_notifying: true,
       });
       publish({

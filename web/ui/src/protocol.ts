@@ -21,6 +21,7 @@ export type BluetoothDevice = {
   address: string;
   name: string;
   iphone: boolean;
+  apple_nearby?: boolean;
   paired: boolean;
   bonded: boolean;
   trusted: boolean;

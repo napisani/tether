@@ -78,6 +78,49 @@ describe("guided pairing view", () => {
     expect(confirmPairing).toHaveBeenCalledWith(true);
   });
 
+  it("offers an Apple nearby advertisement as a possible iPhone", () => {
+    const pair = vi.fn();
+    const candidate = {
+      ...pairedState.devices[0],
+      address: "40:F6:64:3D:7A:F1",
+      name: "40-F6-64-3D-7A-F1",
+      iphone: false,
+      apple_nearby: true,
+      paired: false,
+      bonded: false,
+      trusted: false,
+      connected: false,
+      classic_connected: false,
+      le_bonded: false,
+      le_connected: false,
+      map: false,
+      pbap: false,
+      ancs: false,
+      ancs_notifying: false,
+    };
+    render(
+      <AppView
+        state={{
+          ...pairedState,
+          bluetooth: { command: "bt_status", available: true },
+          connection: undefined,
+          devices: [candidate],
+          pairing: { phase: "idle" },
+        }}
+        onScan={vi.fn()}
+        onPair={pair}
+        onUnpair={vi.fn()}
+        onConfirmPairing={vi.fn()}
+        onResetPairing={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Nearby Apple device" })).toBeInTheDocument();
+    expect(screen.getAllByText("Possible iPhone")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "Pair over Bluetooth" }));
+    expect(pair).toHaveBeenCalledWith("40:F6:64:3D:7A:F1");
+  });
+
   it("requires confirmation before forgetting a bonded iPhone", () => {
     const unpair = vi.fn();
     render(

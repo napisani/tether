@@ -6,8 +6,9 @@ test("pairs an iPhone through the guided browser flow", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Connect your iPhone" })).toBeVisible();
   await page.getByRole("button", { name: "Scan for iPhone", exact: true }).last().click();
 
-  await expect(page.getByRole("button", { name: /Nick’s iPhone/ })).toBeVisible();
-  await page.getByRole("button", { name: /Nick’s iPhone/ }).click();
+  const candidate = page.getByRole("button", { name: /Nearby Apple device Possible iPhone/ });
+  await expect(candidate).toBeVisible();
+  await candidate.click();
   await page.getByRole("button", { name: "Pair over Bluetooth" }).click();
 
   const dialog = page.getByRole("dialog", { name: "Does your iPhone show this code?" });
