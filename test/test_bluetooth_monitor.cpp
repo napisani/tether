@@ -6,14 +6,42 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <sys/types.h>
 #include <unistd.h>
 
 using namespace std::chrono_literals;
+using tether::bluetooth::bluetoothd_has_experimental;
 using tether::bluetooth::probe_secure_connections;
 
 namespace {
+
+    class ScopedEnvironment {
+    public:
+        ScopedEnvironment(const char* name, const char* value) : name_(name) {
+            if (const char* current = std::getenv(name))
+                old_value_ = current;
+            if (value)
+                setenv(name, value, 1);
+            else
+                unsetenv(name);
+        }
+
+        ~ScopedEnvironment() {
+            if (old_value_)
+                setenv(name_.c_str(), old_value_->c_str(), 1);
+            else
+                unsetenv(name_.c_str());
+        }
+
+        ScopedEnvironment(const ScopedEnvironment&) = delete;
+        ScopedEnvironment& operator=(const ScopedEnvironment&) = delete;
+
+    private:
+        std::string name_;
+        std::optional<std::string> old_value_;
+    };
 
     class FakeBtmgmt {
     public:
@@ -49,6 +77,25 @@ namespace {
     };
 
 } // namespace
+
+TEST(ContainerCapabilityHints, ReportHostBluezConfigurationWithoutHostProcessesOrTools) {
+    {
+        ScopedEnvironment experimental("TETHER_BLUEZ_EXPERIMENTAL", "1");
+        EXPECT_TRUE(bluetoothd_has_experimental());
+    }
+    {
+        ScopedEnvironment experimental("TETHER_BLUEZ_EXPERIMENTAL", "0");
+        EXPECT_FALSE(bluetoothd_has_experimental());
+    }
+    {
+        ScopedEnvironment secure("TETHER_BLUEZ_SECURE_CONNECTIONS", "true");
+        EXPECT_EQ(probe_secure_connections("hci0", 1ms), true);
+    }
+    {
+        ScopedEnvironment secure("TETHER_BLUEZ_SECURE_CONNECTIONS", "false");
+        EXPECT_EQ(probe_secure_connections("hci0", 1ms), false);
+    }
+}
 
 TEST(SecureConnectionsProbe, ParsesEnabledAndDisabledSettings) {
     {

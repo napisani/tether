@@ -35,7 +35,12 @@ needs a Wayland session and is not available here.
    has its own packaged OBEX client (currently 5.72). Record both versions when testing.
 2. Run Avahi and the system bus on the host. Open inbound 5134/tcp and mDNS
    5353/udp on the trusted local network; see the README's firewall instructions.
-3. Choose a real non-root host UID/GID authorized to use the host system bus and
+3. Verify the host settings, then set `TETHER_BLUEZ_EXPERIMENTAL=1` and
+   `TETHER_BLUEZ_SECURE_CONNECTIONS=1` in the container environment. A container
+   can use BlueZ over D-Bus but cannot inspect the host daemon's PID namespace or
+   run host management tools, so these declarations make diagnostics reflect the
+   configuration you verified.
+4. Choose a real non-root host UID/GID authorized to use the host system bus and
    Bluetooth services. Do not run another `tetherd` on that host port/adapter.
 
 The example mounts `/run/dbus` read-only at `/host/run/dbus`. **This is privileged
@@ -70,6 +75,8 @@ Edit `packaging/container/.env`:
   paths. Replace the example `/home/your-user` values; do not use literal `$HOME`.
 - Optionally choose `TETHER_HOSTNAME`, a DNS-style host label such as `tether-pi`.
   It is the advertised display name; the persisted certificate is the identity.
+- Leave the two BlueZ capability declarations at `1` only after checking that the
+  host meets both prerequisites. Set either to `0` when that capability is absent.
 
 The entrypoint refuses wrong ownership or a non-private data directory rather
 than recursively changing your files. Existing directories must already be
@@ -202,12 +209,18 @@ requires handling that host's bonds separately.
 - Docker does **not** restart a still-running container just because it is
   unhealthy. Inspect logs and restart deliberately if needed.
 
-The two new opt-in environment switches are also usable outside Docker:
+These environment switches are also usable outside Docker:
 
-| Variable | Exact value `1` does this | Otherwise |
+| Variable | Value | Behavior |
 |---|---|---|
-| `TETHER_LOG_STDERR` | Keep daemon stderr attached to its supervisor | Preserve normal nonterminal log-file behavior |
-| `TETHER_NO_AUTOSTART` | Prevent CLI/client helpers from spawning `tetherd` | Preserve normal spawning/systemd ownership behavior |
+| `TETHER_LOG_STDERR` | `1` | Keep daemon stderr attached to its supervisor |
+| `TETHER_NO_AUTOSTART` | `1` | Prevent CLI/client helpers from spawning `tetherd` |
+| `TETHER_BLUEZ_EXPERIMENTAL` | Boolean (`1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off`) | Declare whether the host started `bluetoothd` with experimental APIs |
+| `TETHER_BLUEZ_SECURE_CONNECTIONS` | Boolean, as above | Declare whether the host controller has Secure Connections enabled |
+
+Unset runtime switches preserve normal behavior. Unset capability declarations
+fall back to local `/proc` and `btmgmt` probes, which are suitable outside a
+container but cannot reliably inspect a container's host.
 
 `XDG_DOWNLOAD_DIR` now takes precedence when nonempty and absolute; invalid or
 empty overrides fall back to the existing GLib/HOME lookup.
@@ -223,10 +236,9 @@ Troubleshooting:
   reason to enable privileged mode silently.
 - **Phone not discoverable:** confirm Avahi, host firewall and local multicast
   connectivity. This container cannot make mDNS cross an isolated network/VPN.
-- **Misleading `tether bt setup` advice:** some diagnostics inspect `/proc` for
-  `bluetoothd` or use `btmgmt`. The host process is hidden by the container's PID
-  namespace, and raw probes may lack permission. Apply the documented setup on
-  the host; don't share host PID space just to improve a diagnostic.
+- **Misleading `tether bt setup` advice:** verify the host capabilities and pass
+  the two matching `TETHER_BLUEZ_*` declarations. Do not share host PID space or
+  add Bluetooth management capabilities just to improve a diagnostic.
 - **Host service repaired/restarted:** Tether may need a container restart if
   BlueZ was unavailable during startup. This packaging does not promise new
   D-Bus reconnection behavior.
