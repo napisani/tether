@@ -8,6 +8,9 @@ test("pairs an iPhone through the guided browser flow", async ({ page }) => {
 
   const candidate = page.getByRole("button", { name: /Nearby Apple device Possible iPhone/ });
   await expect(candidate).toBeVisible();
+  await page.waitForTimeout(100);
+  await expect(candidate).toBeVisible();
+  await expect(page.getByText("Bluetooth: ready")).toBeVisible();
   await candidate.click();
   await page.getByRole("button", { name: "Pair over Bluetooth" }).click();
 
@@ -17,5 +20,5 @@ test("pairs an iPhone through the guided browser flow", async ({ page }) => {
 
   await expect(page.getByText("Pairing complete")).toBeVisible();
   await expect(page.getByText("Paired with Nick’s iPhone.")).toBeVisible();
-  await expect(page.getByText("Bluetooth: connected")).toBeVisible();
+  await expect(page.getByText("Bluetooth: iPhone connected")).toBeVisible();
 });
