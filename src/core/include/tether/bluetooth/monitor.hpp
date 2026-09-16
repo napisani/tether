@@ -62,9 +62,15 @@ namespace tether::bluetooth {
 
     extern BluezMonitor* g_bluez;
 
+    // BlueZ does not expose whether bluetoothd started with experimental APIs.
+    // Reads TETHER_BLUEZ_EXPERIMENTAL when supplied by a container orchestrator,
+    // otherwise inspects the host process command line.
+    bool bluetoothd_has_experimental();
+
     // BlueZ exposes Secure Connections only through the management interface.
-    // Runs btmgmt without a shell and returns no value if it fails or exceeds the
-    // deadline. Public so the process boundary and timeout can be tested directly.
+    // Reads TETHER_BLUEZ_SECURE_CONNECTIONS when supplied by a container
+    // orchestrator, otherwise runs btmgmt and returns no value if it fails or
+    // exceeds the deadline. Public so both boundaries can be tested directly.
     std::optional<bool> probe_secure_connections(const std::string& adapter_id,
                                                  std::chrono::milliseconds timeout = std::chrono::seconds(1));
 

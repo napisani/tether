@@ -8,6 +8,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
+#include <cstdlib>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
@@ -16,6 +17,7 @@
 #include <mutex>
 #include <optional>
 #include <poll.h>
+#include <string_view>
 #include <sys/eventfd.h>
 #include <sys/wait.h>
 #include <thread>
@@ -194,11 +196,31 @@ namespace tether::bluetooth {
         return false;
     }
 
+    namespace {
+        std::optional<bool> environment_flag(const char* name) {
+            const char* raw = std::getenv(name);
+            if (!raw)
+                return std::nullopt;
+
+            const std::string_view value(raw);
+            if (value == "1" || value == "true" || value == "yes" || value == "on")
+                return true;
+            if (value == "0" || value == "false" || value == "no" || value == "off")
+                return false;
+
+            debug::log(WARN, "bluetooth: ignoring invalid {}={}", name, value);
+            return std::nullopt;
+        }
+    } // namespace
+
     // Walking /proc costs about 2ms and refresh() runs on every debounced BlueZ
-    // signal, so the answer is cached. It cannot change without bluetoothd
-    // restarting, but that is exactly what applying the drop-in does, and
-    // bluetoothd routinely restarts after tetherd is already up.
+    // signal, so the discovered answer is cached. A container orchestrator can
+    // provide the host's answer because host processes are absent from its PID
+    // namespace even when the host system bus is mounted in.
     bool bluetoothd_has_experimental() {
+        if (const auto configured = environment_flag("TETHER_BLUEZ_EXPERIMENTAL"))
+            return *configured;
+
         static constexpr auto kRecheckAfter = std::chrono::seconds(3);
         static std::chrono::steady_clock::time_point checked_at{};
         static bool value = false;
@@ -214,6 +236,8 @@ namespace tether::bluetooth {
     std::optional<bool> probe_secure_connections(const std::string& adapter_id, std::chrono::milliseconds timeout) {
         if (adapter_id.empty())
             return std::nullopt;
+        if (const auto configured = environment_flag("TETHER_BLUEZ_SECURE_CONNECTIONS"))
+            return configured;
 
         std::array<gchar*, 5> argv = {
             const_cast<gchar*>("btmgmt"),
