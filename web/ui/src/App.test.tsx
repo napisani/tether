@@ -119,6 +119,7 @@ describe("guided pairing view", () => {
     expect(screen.getAllByText("Possible iPhone")).toHaveLength(2);
     fireEvent.click(screen.getByRole("button", { name: "Pair over Bluetooth" }));
     expect(pair).toHaveBeenCalledWith("40:F6:64:3D:7A:F1");
+    expect(screen.getByText("Bluetooth: ready")).toBeInTheDocument();
   });
 
   it("requires confirmation before forgetting a bonded iPhone", () => {

@@ -90,10 +90,11 @@ function publish(event) {
 
 function handleCommand(command) {
   if (command.command === "bt_scan") {
+    setTimeout(() => publish({ command: "bt_devices", devices: [phone] }), 20);
     setTimeout(() => {
-      publish({ command: "bt_devices", devices: [phone] });
       publish({ command: "bt_scan_result", success: true, message: "Bluetooth scan finished." });
-    }, 20);
+      publish({ command: "bt_devices", devices: [] });
+    }, 40);
   }
   if (command.command === "bt_pair") {
     setTimeout(() => {

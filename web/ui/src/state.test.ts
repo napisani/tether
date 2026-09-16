@@ -32,6 +32,45 @@ describe("device discovery", () => {
 
     expect(state.devices).toHaveLength(1);
   });
+
+  it("keeps the last anonymous candidates when BlueZ removes them after scanning", () => {
+    const candidate = {
+      address: "40:F6:64:3D:7A:F1",
+      name: "40-F6-64-3D-7A-F1",
+      iphone: false,
+      apple_nearby: true,
+      paired: false,
+      bonded: false,
+      trusted: false,
+      connected: false,
+      classic_connected: false,
+      le_bearer: true,
+      le_bonded: false,
+      le_connected: false,
+      map: false,
+      pbap: false,
+      ancs: false,
+      ancs_notifying: false,
+    };
+    let state = reduceAppState(initialState, { type: "scan-started" });
+    state = reduceAppState(state, {
+      type: "daemon-event",
+      event: { command: "bt_devices", devices: [candidate] },
+    });
+    state = reduceAppState(state, {
+      type: "daemon-event",
+      event: { command: "bt_scan_result", success: true, message: "Bluetooth scan finished." },
+    });
+    state = reduceAppState(state, {
+      type: "daemon-event",
+      event: { command: "bt_devices", devices: [] },
+    });
+
+    expect(state.devices).toEqual([candidate]);
+
+    const rescanning = reduceAppState(state, { type: "scan-started" });
+    expect(rescanning.devices).toEqual([]);
+  });
 });
 
 describe("pairing state", () => {

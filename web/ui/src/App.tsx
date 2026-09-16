@@ -209,8 +209,13 @@ export function AppView({
       </main>
 
       <footer className="statusbar">
-        <StatusItem icon="◉" label="Gateway" active={state.gatewayConnected} />
-        <StatusItem icon="ᛒ" label="Bluetooth" active={connected} />
+        <StatusItem icon="◉" label="Gateway" status={state.gatewayConnected ? "connected" : "offline"} active={state.gatewayConnected} />
+        <StatusItem
+          icon="ᛒ"
+          label="Bluetooth"
+          status={connected ? "iPhone connected" : bluetoothAvailable ? "ready" : "unavailable"}
+          active={bluetoothAvailable}
+        />
         <span className="version">{state.bluetooth?.version ? `Tether ${state.bluetooth.version}` : "Tether web"}</span>
       </footer>
 
@@ -381,8 +386,8 @@ function CapabilityCard({ label, detail, active }: { label: string; detail: stri
   );
 }
 
-function StatusItem({ icon, label, active }: { icon: string; label: string; active: boolean }) {
-  return <span className={`status-item ${active ? "active" : ""}`}><span aria-hidden="true">{icon}</span>{label}: {active ? "connected" : "offline"}</span>;
+function StatusItem({ icon, label, status, active }: { icon: string; label: string; status: string; active: boolean }) {
+  return <span className={`status-item ${active ? "active" : ""}`}><span aria-hidden="true">{icon}</span>{label}: {status}</span>;
 }
 
 function Notice({ title, body, tone }: { title: string; body: string; tone: "warning" }) {
