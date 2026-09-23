@@ -409,23 +409,22 @@ namespace {
 
     TEST(ControlProtocolTest, AdvertisesVersionedCapabilities) {
         const auto info = tether::build_protocol_info();
-
-        EXPECT_EQ(info.at("command"), "protocol_info");
-        EXPECT_EQ(info.at("version"), 1);
+        EXPECT_EQ(info.value("command", ""), "protocol_info");
+        EXPECT_EQ(info.value("version", 0), 1);
         EXPECT_EQ(info.at("capabilities"),
-                  nlohmann::json::array({"airpods",
-                                         "bluetooth.connection",
-                                         "bluetooth.diagnostics",
-                                         "bluetooth.pairing",
-                                         "calls",
-                                         "clipboard",
-                                         "contacts",
-                                         "files",
-                                         "messages",
-                                         "notifications",
-                                         "otp",
-                                         "peers",
-                                         "settings"}));
+                  nlohmann::json({"airpods",
+                                  "bluetooth.connection",
+                                  "bluetooth.diagnostics",
+                                  "bluetooth.pairing",
+                                  "calls",
+                                  "clipboard",
+                                  "contacts",
+                                  "files",
+                                  "messages",
+                                  "notifications",
+                                  "otp",
+                                  "peers",
+                                  "settings"}));
     }
 
     TEST(ClientTest, ConnectsToAnIpv6Literal) {

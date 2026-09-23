@@ -4,8 +4,10 @@ import (
 	"context"
 	"embed"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -35,10 +37,12 @@ func run() error {
 
 	listenAddress := envOr("TETHER_WEB_LISTEN", "127.0.0.1:5135")
 	allowedHosts := csv(os.Getenv("TETHER_WEB_ALLOWED_HOSTS"))
-	if len(allowedHosts) == 0 {
-		if strings.HasPrefix(listenAddress, "0.0.0.0:") || strings.HasPrefix(listenAddress, "[::]:") || strings.HasPrefix(listenAddress, ":") {
-			return errors.New("TETHER_WEB_ALLOWED_HOSTS is required when listening on a wildcard address")
-		}
+	wildcard, err := isWildcardListenAddress(listenAddress)
+	if err != nil {
+		return err
+	}
+	if len(allowedHosts) == 0 && wildcard {
+		return errors.New("TETHER_WEB_ALLOWED_HOSTS is required when listening on a wildcard address")
 	}
 	allowedHosts = append(allowedHosts, "127.0.0.1", "localhost", "::1")
 
@@ -50,7 +54,7 @@ func run() error {
 
 	assets, err := fs.Sub(embeddedAssets, "dist")
 	if err != nil {
-		return err
+		return fmt.Errorf("opening embedded web assets: %w", err)
 	}
 	if _, err := fs.Stat(assets, "index.html"); err != nil {
 		return errors.New("web assets are missing; run the UI build before compiling tether-web")
@@ -61,8 +65,10 @@ func run() error {
 	server := &http.Server{
 		Addr:              listenAddress,
 		Handler:           gateway.NewHandler(bus, assets, gateway.Config{AllowedHosts: allowedHosts}),
+		ReadTimeout:       10 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	serverErrors := make(chan error, 1)
@@ -80,8 +86,20 @@ func run() error {
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("serving HTTP: %w", err)
 	}
+}
+
+func isWildcardListenAddress(address string) (bool, error) {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false, fmt.Errorf("parsing TETHER_WEB_LISTEN %q: %w", address, err)
+	}
+	if host == "" {
+		return true, nil
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsUnspecified(), nil
 }
 
 func envOr(key, fallback string) string {

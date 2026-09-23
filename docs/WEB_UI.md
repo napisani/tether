@@ -3,7 +3,8 @@
 The web interface is a client of `tetherd`, not a second implementation of Tether.
 Its first release covers guided Bluetooth pairing and current connection status.
 Messages, contacts, notifications, calls, files, and settings can be added without
-changing the transport shape.
+changing the transport shape. [`UI_PARITY.md`](UI_PARITY.md) tracks how those
+features map to the GTK client and the order in which parity will be closed.
 
 ## Modules and seams
 
@@ -38,15 +39,18 @@ results, or grow feature-specific HTTP routes.
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/api/v1/commands` | Forward one JSON daemon command |
-| `GET` | `/api/v1/events` | Stream daemon events with server-sent events |
-| `GET` | `/api/v1/state` | Return the latest durable status events for a newly opened tab |
+| `GET` | `/api/v1/events` | Send an initial snapshot, then stream daemon events with server-sent events |
+| `GET` | `/api/v1/state` | Return a one-shot copy of the latest durable status events |
 | `GET` | `/healthz` | Gateway process liveness |
 | `GET` | `/readyz` | Gateway is connected to `tetherd` |
 
-Transient events such as passkey confirmation and pairing progress are never
-cached. Pairing commands carry an `operation_id`; progress, confirmation, and
-results echo it. A browser tab ignores events for operations it did not start.
-Legacy clients may omit the identifier.
+The SSE stream starts with an atomic durable-state snapshot. Live events carry
+monotonic SSE IDs, and the gateway retains a bounded replay window so an
+`EventSource` reconnect can recover transient pairing progress and passkey
+confirmation without racing a separate snapshot request. Pairing commands carry
+an `operation_id`; progress, confirmation, and results echo it. A browser tab
+ignores events for operations it did not start. Legacy clients may omit the
+identifier.
 
 On subscription, `tetherd` emits `protocol_info` with a protocol version and
 coarse capabilities. Clients hide controls for unavailable capability groups
@@ -60,8 +64,10 @@ A feature should normally require changes in these places only:
 2. Add the capability to `build_protocol_info()` only when introducing a new
    capability group.
 3. Add the command/event shape to `web/ui/src/protocol.ts`.
-4. Reduce live events into browser state and build the feature UI.
-5. Add a reducer/component test and a browser workflow test using the fake gateway.
+4. Add or update the matching `web/ui/src/views/<feature>/<Feature>View.tsx` module.
+5. Reduce live events in that view's state module and build its React components.
+6. Add focused reducer, component, and fake-gateway browser tests.
+7. Update the parity status in [`UI_PARITY.md`](UI_PARITY.md).
 
 Do not add `/api/v1/messages`, `/api/v1/contacts`, or similar gateway routes.
 That would duplicate the daemon interface and make GTK, CLI, and web behavior
@@ -80,7 +86,8 @@ Use HTTPS ingress and restrict port 5135 with the host firewall. The gateway:
 - rejects cross-origin and cross-site mutating requests;
 - provides no CORS access;
 - accepts commands only as `application/json`;
-- limits command bodies to 1 MiB;
+- limits command bodies to 1 MiB and bounds request-read time;
+- caps concurrent event subscribers and keeps a bounded event replay window;
 - sets a restrictive content security policy and disallows framing; and
 - never exposes the daemon's Unix socket.
 

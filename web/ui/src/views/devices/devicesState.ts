@@ -3,8 +3,7 @@ import type {
   BluetoothDevice,
   BluetoothStatusEvent,
   DaemonEvent,
-  ProtocolInfoEvent,
-} from "./protocol";
+} from "../../protocol";
 
 export type PairingPhase = "idle" | "pairing" | "confirming" | "complete" | "error";
 
@@ -19,9 +18,7 @@ export type PairingState = {
   message?: string;
 };
 
-export type AppState = {
-  gatewayConnected: boolean;
-  protocol?: ProtocolInfoEvent;
+export type DevicesState = {
   bluetooth?: BluetoothStatusEvent;
   connection?: BluetoothConnectionEvent;
   devices: BluetoothDevice[];
@@ -30,28 +27,23 @@ export type AppState = {
   pairing: PairingState;
 };
 
-export const initialState: AppState = {
-  gatewayConnected: false,
+export const initialDevicesState: DevicesState = {
   devices: [],
   scanning: false,
   pairing: { phase: "idle" },
 };
 
-export type AppAction =
-  | { type: "gateway-connected"; connected: boolean }
+export type DevicesAction =
   | { type: "scan-started" }
   | { type: "pair-started"; operationId: string; address: string }
   | { type: "unpair-started"; operationId: string; address: string }
   | { type: "pair-confirmation-sent" }
   | { type: "operation-failed"; message: string }
   | { type: "scan-failed"; message: string }
-  | { type: "pair-reset" }
-  | { type: "daemon-event"; event: DaemonEvent };
+  | { type: "pair-reset" };
 
-export function reduceAppState(state: AppState, action: AppAction): AppState {
+export function reduceDevicesState(state: DevicesState, action: DevicesAction): DevicesState {
   switch (action.type) {
-    case "gateway-connected":
-      return { ...state, gatewayConnected: action.connected };
     case "scan-started":
       return {
         ...state,
@@ -100,17 +92,11 @@ export function reduceAppState(state: AppState, action: AppAction): AppState {
       return { ...state, scanning: false, scanMessage: action.message };
     case "pair-reset":
       return { ...state, pairing: { phase: "idle" } };
-    case "daemon-event":
-      return reduceDaemonEvent(state, action.event);
   }
 }
 
-function reduceDaemonEvent(state: AppState, event: DaemonEvent): AppState {
+export function reduceDevicesEvent(state: DevicesState, event: DaemonEvent): DevicesState {
   switch (event.command) {
-    case "gateway_status":
-      return { ...state, gatewayConnected: event.daemon_connected };
-    case "protocol_info":
-      return { ...state, protocol: event as ProtocolInfoEvent };
     case "bt_status":
       return { ...state, bluetooth: event as BluetoothStatusEvent };
     case "bt_devices": {
