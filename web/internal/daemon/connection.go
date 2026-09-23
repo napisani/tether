@@ -15,9 +15,17 @@ import (
 
 func (c *Client) Run(ctx context.Context) {
 	retryDelay := c.retryInterval
+	var lastDialError string
+	var lastDialLog time.Time
 	for ctx.Err() == nil {
 		connection, err := (&net.Dialer{}).DialContext(ctx, "unix", c.socketPath)
 		if err != nil {
+			now := time.Now()
+			if message := err.Error(); message != lastDialError || now.Sub(lastDialLog) >= dialLogInterval {
+				slog.Warn("could not connect to tetherd", "socket", c.socketPath, "error", err)
+				lastDialError = message
+				lastDialLog = now
+			}
 			if !wait(ctx, jitterRetryDelay(retryDelay)) {
 				return
 			}
@@ -25,6 +33,11 @@ func (c *Client) Run(ctx context.Context) {
 			continue
 		}
 
+		if lastDialError != "" {
+			slog.Info("connected to tetherd", "socket", c.socketPath)
+			lastDialError = ""
+			lastDialLog = time.Time{}
+		}
 		connectedAt := time.Now()
 		c.consumeConnection(ctx, connection)
 		if ctx.Err() != nil {

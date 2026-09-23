@@ -15,7 +15,8 @@ func TestStateEndpointExposesDaemonSnapshot(t *testing.T) {
 		snapshot: gateway.Snapshot{
 			DaemonConnected: true,
 			Events: map[string]json.RawMessage{
-				"bt_status": json.RawMessage(`{"command":"bt_status","available":true}`),
+				"gateway_status": json.RawMessage(`{"command":"gateway_status","daemon_connected":true}`),
+				"bt_status":      json.RawMessage(`{"command":"bt_status","available":true}`),
 			},
 		},
 	}
@@ -31,7 +32,7 @@ func TestStateEndpointExposesDaemonSnapshot(t *testing.T) {
 	if response.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("Cache-Control = %q", response.Header().Get("Cache-Control"))
 	}
-	if got := response.Body.String(); got != "{\"daemon_connected\":true,\"events\":{\"bt_status\":{\"command\":\"bt_status\",\"available\":true}}}\n" {
+	if got := response.Body.String(); got != "{\"daemon_connected\":true,\"events\":{\"bt_status\":{\"command\":\"bt_status\",\"available\":true},\"gateway_status\":{\"command\":\"gateway_status\",\"daemon_connected\":true}}}\n" {
 		t.Fatalf("state = %s", got)
 	}
 }

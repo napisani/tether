@@ -5,7 +5,7 @@ import { deviceDisplayName } from "./device";
 export function DevicePane({
   device,
   connection,
-  supervised,
+  isConfiguredDevice,
   pairingAvailable,
   pairingBusy,
   onPair,
@@ -13,7 +13,7 @@ export function DevicePane({
 }: {
   device: BluetoothDevice;
   connection?: BluetoothConnectionEvent;
-  supervised: boolean;
+  isConfiguredDevice: boolean;
   pairingAvailable: boolean;
   pairingBusy: boolean;
   onPair: (address: string) => void;
@@ -41,9 +41,9 @@ export function DevicePane({
         <div className="status-grid">
           <CapabilityCard label="Classic Bluetooth" detail="Phone link" active={Boolean(device.classic_connected)} />
           <CapabilityCard label="Low Energy" detail="Notification link" active={Boolean(device.le_connected)} />
-          <CapabilityCard label="Messages" detail={supervised ? "MAP" : "Not supervised"} active={Boolean(connection?.map_open)} />
-          <CapabilityCard label="Contacts" detail={supervised ? "PBAP" : "Not supervised"} active={Boolean(connection?.pbap_open)} />
-          <CapabilityCard label="Notifications" detail={supervised ? "ANCS" : "Not supervised"} active={Boolean(connection?.ancs_ready)} />
+          <CapabilityCard label="Messages" detail={isConfiguredDevice ? "MAP" : "Not supervised"} active={Boolean(connection?.map_open)} />
+          <CapabilityCard label="Contacts" detail={isConfiguredDevice ? "PBAP" : "Not supervised"} active={Boolean(connection?.pbap_open)} />
+          <CapabilityCard label="Notifications" detail={isConfiguredDevice ? "ANCS" : "Not supervised"} active={Boolean(connection?.ancs_ready)} />
         </div>
       </section>
 

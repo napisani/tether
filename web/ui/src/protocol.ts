@@ -1,6 +1,6 @@
 export type JsonRecord = Record<string, unknown>;
 
-interface DaemonEventBase {
+interface DaemonEventBase extends JsonRecord {
   operation_id?: string;
 }
 
@@ -66,18 +66,36 @@ export interface BluetoothConnectionEvent extends DaemonEventBase {
   remedy?: string;
 }
 
-export interface BluetoothResultEvent extends DaemonEventBase {
-  command: "bt_scan_result" | "bt_pair_result" | "bt_unpair_result";
-  success?: boolean;
-  status?: string;
-  message?: string;
+export interface BluetoothScanResultEvent extends DaemonEventBase {
+  command: "bt_scan_result";
+  success: boolean;
+  message: string;
+}
+
+export interface BluetoothPairResultEvent extends DaemonEventBase {
+  command: "bt_pair_result";
+  success: boolean;
+  status: string;
+  message: string;
   dual_bond?: boolean;
 }
 
+export interface BluetoothUnpairResultEvent extends DaemonEventBase {
+  command: "bt_unpair_result";
+  success: boolean;
+  status?: string;
+  message: string;
+}
+
+export type BluetoothResultEvent =
+  | BluetoothScanResultEvent
+  | BluetoothPairResultEvent
+  | BluetoothUnpairResultEvent;
+
 export interface BluetoothPairingProgressEvent extends DaemonEventBase {
   command: "bt_pair_progress";
-  step?: string;
-  detail?: string;
+  step: string;
+  detail: string;
 }
 
 export interface BluetoothPairingConfirmationEvent extends DaemonEventBase {
@@ -101,10 +119,33 @@ export type DaemonEvent =
   | BluetoothPairingConfirmationEvent
   | GatewayStatusEvent;
 
-export interface DaemonCommand extends JsonRecord {
-  command: string;
-  operation_id?: string;
+export interface BluetoothScanCommand extends JsonRecord {
+  command: "bt_scan";
 }
+
+export interface BluetoothPairCommand extends JsonRecord {
+  command: "bt_pair";
+  address: string;
+  operation_id: string;
+}
+
+export interface BluetoothUnpairCommand extends JsonRecord {
+  command: "bt_unpair";
+  address: string;
+  operation_id: string;
+}
+
+export interface BluetoothPairConfirmationCommand extends JsonRecord {
+  command: "bt_pair_confirm";
+  operation_id: string;
+  accept: boolean;
+}
+
+export type DaemonCommand =
+  | BluetoothScanCommand
+  | BluetoothPairCommand
+  | BluetoothUnpairCommand
+  | BluetoothPairConfirmationCommand;
 
 export interface GatewayState {
   daemon_connected: boolean;

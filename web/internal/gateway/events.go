@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,7 +9,10 @@ import (
 	"time"
 )
 
-const heartbeatInterval = 15 * time.Second
+const (
+	heartbeatInterval = 15 * time.Second
+	eventWriteTimeout = 10 * time.Second
+)
 
 func registerEventHandler(mux *http.ServeMux, bus Bus) {
 	mux.HandleFunc(eventsRoute, func(w http.ResponseWriter, r *http.Request) {
@@ -30,14 +32,20 @@ func registerEventHandler(mux *http.ServeMux, bus Bus) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("X-Accel-Buffering", "no")
+		controller := http.NewResponseController(w)
+		if err := controller.SetWriteDeadline(time.Now().Add(eventWriteTimeout)); err != nil {
+			http.Error(w, "streaming deadlines are unavailable", http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
+		writer := deadlineWriter{writer: w, controller: controller}
 
 		for _, event := range subscription.Replay {
-			if err := writeEvent(w, event); err != nil {
+			if err := writeEvent(writer, event); err != nil {
 				return
 			}
 		}
-		if err := writeSnapshot(w, subscription.Snapshot); err != nil {
+		if err := writeSnapshot(writer, subscription.Snapshot); err != nil {
 			return
 		}
 		flusher.Flush()
@@ -49,7 +57,7 @@ func registerEventHandler(mux *http.ServeMux, bus Bus) {
 			case <-r.Context().Done():
 				return
 			case <-heartbeat.C:
-				if _, err := w.Write([]byte(": keepalive\n\n")); err != nil {
+				if _, err := writer.Write([]byte(": keepalive\n\n")); err != nil {
 					return
 				}
 				flusher.Flush()
@@ -57,7 +65,7 @@ func registerEventHandler(mux *http.ServeMux, bus Bus) {
 				if !open {
 					return
 				}
-				if err := writeEvent(w, event); err != nil {
+				if err := writeEvent(writer, event); err != nil {
 					return
 				}
 				flusher.Flush()
@@ -67,15 +75,9 @@ func registerEventHandler(mux *http.ServeMux, bus Bus) {
 }
 
 func writeSnapshot(w io.Writer, snapshot Snapshot) error {
-	status, err := json.Marshal(struct {
-		Command         string `json:"command"`
-		DaemonConnected bool   `json:"daemon_connected"`
-	}{
-		Command:         "gateway_status",
-		DaemonConnected: snapshot.DaemonConnected,
-	})
-	if err != nil {
-		return fmt.Errorf("encoding gateway status: %w", err)
+	status, ok := snapshot.Events["gateway_status"]
+	if !ok {
+		return fmt.Errorf("snapshot is missing gateway_status")
 	}
 	if err := writeEvent(w, Event{Data: status}); err != nil {
 		return err
@@ -94,6 +96,18 @@ func writeSnapshot(w io.Writer, snapshot Snapshot) error {
 		}
 	}
 	return nil
+}
+
+type deadlineWriter struct {
+	writer     io.Writer
+	controller *http.ResponseController
+}
+
+func (w deadlineWriter) Write(data []byte) (int, error) {
+	if err := w.controller.SetWriteDeadline(time.Now().Add(eventWriteTimeout)); err != nil {
+		return 0, fmt.Errorf("setting event-stream write deadline: %w", err)
+	}
+	return w.writer.Write(data)
 }
 
 func writeEvent(w io.Writer, event Event) error {

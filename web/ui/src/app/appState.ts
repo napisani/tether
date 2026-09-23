@@ -29,7 +29,11 @@ export type AppAction =
 
 export function reduceAppState(state: AppState, action: AppAction): AppState {
   if (action.type === "daemon-connected") {
-    return { ...state, daemon: { ...state.daemon, connected: action.connected } };
+    return {
+      ...state,
+      daemon: { ...state.daemon, connected: action.connected },
+      devices: action.connected ? state.devices : reduceDevicesState(state.devices, { type: "daemon-disconnected" }),
+    };
   }
 
   if (action.type === "daemon-event") {

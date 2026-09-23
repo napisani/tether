@@ -57,6 +57,7 @@ func TestClientBridgesUnixCommandsEventsSnapshotsAndReplay(t *testing.T) {
 	if !subscription.Snapshot.DaemonConnected {
 		t.Fatal("subscription snapshot reports disconnected client")
 	}
+	assertSnapshotGatewayStatus(t, subscription.Snapshot, true)
 	if _, err := connection.Write([]byte(`{"command":"bt_status","available":true}` + "\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -84,6 +85,7 @@ func TestClientBridgesUnixCommandsEventsSnapshotsAndReplay(t *testing.T) {
 	if !snapshot.DaemonConnected || string(snapshot.Events["bt_status"]) != `{"command":"bt_status","available":true}` {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
+	assertSnapshotGatewayStatus(t, snapshot, true)
 
 	command := json.RawMessage(`{"command":"bt_scan"}`)
 	if err := client.Send(context.Background(), command); err != nil {
@@ -96,6 +98,11 @@ func TestClientBridgesUnixCommandsEventsSnapshotsAndReplay(t *testing.T) {
 	if line != string(command)+"\n" {
 		t.Fatalf("forwarded command = %q", line)
 	}
+
+	if err := connection.Close(); err != nil {
+		t.Fatal(err)
+	}
+	waitForGatewayStatus(t, client, false)
 }
 
 func TestClientBoundsEventSubscribers(t *testing.T) {
@@ -187,6 +194,36 @@ func receiveEvent(t *testing.T, events <-chan gateway.Event) gateway.Event {
 		t.Fatal("timed out waiting for daemon event")
 		return gateway.Event{}
 	}
+}
+
+func assertSnapshotGatewayStatus(t *testing.T, snapshot gateway.Snapshot, want bool) {
+	t.Helper()
+	var status struct {
+		DaemonConnected bool `json:"daemon_connected"`
+	}
+	if err := json.Unmarshal(snapshot.Events["gateway_status"], &status); err != nil {
+		t.Fatalf("decoding gateway_status: %v", err)
+	}
+	if snapshot.DaemonConnected != want || status.DaemonConnected != want {
+		t.Fatalf("inconsistent snapshot status: connected=%v event=%s", snapshot.DaemonConnected, snapshot.Events["gateway_status"])
+	}
+}
+
+func waitForGatewayStatus(t *testing.T, client *daemon.Client, want bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		snapshot := client.Snapshot()
+		var status struct {
+			DaemonConnected bool `json:"daemon_connected"`
+		}
+		if err := json.Unmarshal(snapshot.Events["gateway_status"], &status); err == nil &&
+			snapshot.DaemonConnected == want && status.DaemonConnected == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for gateway status %v", want)
 }
 
 func waitForSnapshotEvent(t *testing.T, client *daemon.Client, command string) {

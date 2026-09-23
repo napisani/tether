@@ -24,6 +24,7 @@ func (c *Client) Subscribe(afterID *uint64) (gateway.Subscription, error) {
 		return gateway.Subscription{}, ErrSubscriberLimit
 	}
 	c.subscribers[channel] = struct{}{}
+	connected := c.connected
 	events := cloneEvents(c.events)
 	replay := make([]gateway.Event, 0, len(c.history))
 	if afterID != nil {
@@ -47,7 +48,7 @@ func (c *Client) Subscribe(afterID *uint64) (gateway.Subscription, error) {
 		})
 	}
 	return gateway.Subscription{
-		Snapshot: gateway.Snapshot{DaemonConnected: c.Ready(), Events: events},
+		Snapshot: gateway.Snapshot{DaemonConnected: connected, Events: events},
 		Replay:   replay,
 		Events:   channel,
 		Close:    closeSubscription,
@@ -56,28 +57,34 @@ func (c *Client) Subscribe(afterID *uint64) (gateway.Subscription, error) {
 
 func (c *Client) Snapshot() gateway.Snapshot {
 	c.stateMu.RLock()
-	events := cloneEvents(c.events)
-	c.stateMu.RUnlock()
-	return gateway.Snapshot{DaemonConnected: c.Ready(), Events: events}
+	defer c.stateMu.RUnlock()
+	return gateway.Snapshot{DaemonConnected: c.connected, Events: cloneEvents(c.events)}
 }
 
 func (c *Client) Ready() bool {
-	c.connectionMu.RLock()
-	defer c.connectionMu.RUnlock()
-	return c.connection != nil
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.connected
 }
 
 func (c *Client) publish(data json.RawMessage) {
 	var envelope struct {
-		Command string `json:"command"`
+		Command         string `json:"command"`
+		DaemonConnected *bool  `json:"daemon_connected,omitempty"`
 	}
 	if err := json.Unmarshal(data, &envelope); err != nil || envelope.Command == "" {
+		return
+	}
+	if envelope.Command == "gateway_status" && envelope.DaemonConnected == nil {
 		return
 	}
 
 	eventData := append(json.RawMessage(nil), data...)
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
+	if envelope.Command == "gateway_status" {
+		c.connected = *envelope.DaemonConnected
+	}
 	if _, durable := durableEvents[envelope.Command]; durable {
 		c.events[envelope.Command] = append(json.RawMessage(nil), eventData...)
 	}

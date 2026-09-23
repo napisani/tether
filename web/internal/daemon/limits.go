@@ -10,4 +10,5 @@ const (
 	maxRetryDelay   = 30 * time.Second
 	stableSession   = 30 * time.Second
 	writeTimeout    = 5 * time.Second
+	dialLogInterval = time.Minute
 )

@@ -22,6 +22,7 @@ type Client struct {
 	connection    net.Conn
 	writeMu       sync.Mutex
 	stateMu       sync.RWMutex
+	connected     bool
 	events        map[string]json.RawMessage
 	history       []gateway.Event
 	historyBytes  int
@@ -39,8 +40,10 @@ func New(socketPath string, retryInterval time.Duration) *Client {
 	return &Client{
 		socketPath:    socketPath,
 		retryInterval: retryInterval,
-		events:        make(map[string]json.RawMessage),
-		history:       make([]gateway.Event, 0, maxReplayEvents),
-		subscribers:   make(map[chan gateway.Event]struct{}),
+		events: map[string]json.RawMessage{
+			"gateway_status": json.RawMessage(`{"command":"gateway_status","daemon_connected":false}`),
+		},
+		history:     make([]gateway.Event, 0, maxReplayEvents),
+		subscribers: make(map[chan gateway.Event]struct{}),
 	}
 }

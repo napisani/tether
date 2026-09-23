@@ -18,7 +18,8 @@ func TestEventEndpointStartsWithSnapshotThenStreamsEvents(t *testing.T) {
 		snapshot: gateway.Snapshot{
 			DaemonConnected: true,
 			Events: map[string]json.RawMessage{
-				"bt_status": json.RawMessage(`{"command":"bt_status","available":true}`),
+				"gateway_status": json.RawMessage(`{"command":"gateway_status","daemon_connected":true,"source":"stored"}`),
+				"bt_status":      json.RawMessage(`{"command":"bt_status","available":true}`),
 			},
 		},
 	}
@@ -34,7 +35,7 @@ func TestEventEndpointStartsWithSnapshotThenStreamsEvents(t *testing.T) {
 	reader := bufio.NewReader(response.Body)
 
 	_, data := readSSEEvent(t, reader)
-	if data != `{"command":"gateway_status","daemon_connected":true}` {
+	if data != `{"command":"gateway_status","daemon_connected":true,"source":"stored"}` {
 		t.Fatalf("first event = %s", data)
 	}
 	_, data = readSSEEvent(t, reader)
@@ -50,7 +51,12 @@ func TestEventEndpointStartsWithSnapshotThenStreamsEvents(t *testing.T) {
 }
 
 func TestEventEndpointReplaysMissedEvents(t *testing.T) {
-	bus := &fakeBus{snapshot: gateway.Snapshot{DaemonConnected: true, Events: map[string]json.RawMessage{}}}
+	bus := &fakeBus{snapshot: gateway.Snapshot{
+		DaemonConnected: true,
+		Events: map[string]json.RawMessage{
+			"gateway_status": json.RawMessage(`{"command":"gateway_status","daemon_connected":true}`),
+		},
+	}}
 	handler := gateway.NewHandler(bus, testAssets(), gateway.Config{})
 	server := httptest.NewServer(handler)
 	defer server.Close()

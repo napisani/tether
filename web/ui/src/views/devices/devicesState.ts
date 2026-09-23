@@ -40,6 +40,7 @@ export type DevicesAction =
   | { type: "pair-confirmation-sent" }
   | { type: "operation-failed"; message: string }
   | { type: "scan-failed"; message: string }
+  | { type: "daemon-disconnected" }
   | { type: "pair-reset" };
 
 export function reduceDevicesState(state: DevicesState, action: DevicesAction): DevicesState {
@@ -90,6 +91,23 @@ export function reduceDevicesState(state: DevicesState, action: DevicesAction): 
       };
     case "scan-failed":
       return { ...state, scanning: false, scanMessage: action.message };
+    case "daemon-disconnected": {
+      const operationInProgress = state.pairing.phase === "pairing" || state.pairing.phase === "confirming";
+      return {
+        ...state,
+        scanning: false,
+        scanMessage: state.scanning ? "Bluetooth scan stopped while Tether reconnects." : state.scanMessage,
+        pairing: operationInProgress
+          ? {
+              ...state.pairing,
+              phase: "error",
+              code: undefined,
+              detail: undefined,
+              message: "Connection to tetherd was lost. Try again after it reconnects.",
+            }
+          : state.pairing,
+      };
+    }
     case "pair-reset":
       return { ...state, pairing: { phase: "idle" } };
   }

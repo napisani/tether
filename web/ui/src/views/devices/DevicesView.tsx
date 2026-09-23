@@ -42,7 +42,7 @@ export function DevicesView({
   const pairingAvailable = daemon.protocol?.capabilities.includes("bluetooth.pairing") === true;
   const bluetoothAvailable = state.bluetooth?.available ?? false;
   const pairingBusy = state.pairing.phase === "pairing" || state.pairing.phase === "confirming";
-  const supervised = Boolean(
+  const isConfiguredDevice = Boolean(
     configuredAddress && selectedDevice && configuredAddress.toUpperCase() === selectedDevice.address.toUpperCase(),
   );
 
@@ -68,8 +68,8 @@ export function DevicesView({
           ) : selectedDevice ? (
             <DevicePane
               device={selectedDevice}
-              connection={supervised ? connection : undefined}
-              supervised={supervised}
+              connection={isConfiguredDevice ? connection : undefined}
+              isConfiguredDevice={isConfiguredDevice}
               pairingAvailable={pairingAvailable}
               pairingBusy={pairingBusy}
               onPair={onPair}
