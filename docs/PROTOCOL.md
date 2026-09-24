@@ -292,8 +292,13 @@ a peer: a node that still trusts it will keep dialling it (see §3).
 
 ### `send_file` (Local Client -> Daemon)
 Offloads an entire file transfer to the daemon. The daemon spawns a thread to read the local filesystem and pushes the chunks sequence securely.
-**Payload**: `{"command": "send_file", "path": "/absolute/path/to/my_video.mp4"}`
-**Response**: `{"command": "file_send_complete", "success": true, "message": "Sent my_video.mp4"}`
+**Payload**: `{"command": "send_file", "path": "/absolute/path/to/my_video.mp4", "operation_id": "file-1"}`
+The `operation_id` is optional. When supplied, the asynchronous
+`file_send_complete` event echoes it, including on failure, so a local client
+can match the result to its request. Existing clients may omit it; their result
+remains `{"command": "file_send_complete", "success": true, "message": "Sent my_video.mp4"}`.
+The ID correlates results and does not authorize the request. The file must
+remain available at the path until the terminal result arrives.
 
 ---
 

@@ -1665,7 +1665,8 @@ namespace tether {
                         }).detach();
                     } else if (j.contains("command") && j["command"] == "send_file" && j.contains("path")) {
                         std::string path = j["path"];
-                        std::thread([path]() {
+                        const std::string operation_id = j.value("operation_id", std::string{});
+                        std::thread([path, operation_id]() {
                             Client local;
                             if (local.connect("", 0)) { // connects correctly via unix socket
                                 std::string err;
@@ -1676,6 +1677,8 @@ namespace tether {
                                 resp["message"] =
                                     ok ? tr_format(_("Sent {}"), std::filesystem::path(path).filename().string())
                                        : tr_format(_("Send failed: {}"), err.empty() ? _("unknown error") : err);
+                                if (!operation_id.empty())
+                                    resp["operation_id"] = operation_id;
 
                                 broadcast_local_event(resp.dump());
                             }
