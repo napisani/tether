@@ -525,9 +525,12 @@ Writes through to the phone over OBEX, so it answers asynchronously with a
 `bt_message_read` event carrying `success` and, on failure, `message`.
 
 #### `bt_send_message` (Client -> Daemon, broadcast)
-**Payload**: `{"command": "bt_send_message", "thread": "tel:+15035550101", "body": "on my way"}`
+**Payload**: `{"command": "bt_send_message", "thread": "tel:+15035550101", "body": "on my way", "operation_id": "send-1"}`
 Builds a bMessage and pushes it to the phone's outbox. Answers asynchronously with
-`bt_send_result` (`success`, and `message` when it failed).
+`bt_send_result` (`thread`, `success`, and `message` when it failed). The optional
+`operation_id` is echoed in that result, including on failure; legacy clients
+may omit it. It correlates a local client's send with the result and does not
+authorize the request.
 
 Recipients are validated before they are interpolated into the bMessage: an address
 containing CR, LF, or a vCard delimiter is rejected rather than escaped, because such an

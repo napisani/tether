@@ -1327,14 +1327,17 @@ namespace tether {
                                j.contains("body")) {
                         std::string thread = j["thread"];
                         std::string body = j["body"];
+                        const std::string operation_id = j.value("operation_id", std::string{});
                         // PushMessage is a blocking OBEX transfer, so it cannot
                         // run on the loop that has to keep serving the UI.
-                        std::thread([thread, body]() {
+                        std::thread([thread, body, operation_id]() {
                             std::string err;
                             bluetooth::Message sent;
                             nlohmann::json event;
                             event["command"] = "bt_send_result";
                             event["thread"] = thread;
+                            if (!operation_id.empty())
+                                event["operation_id"] = operation_id;
                             event["success"] = bluetooth::send_message(thread, body, sent, err);
                             if (event["success"]) {
                                 nlohmann::json message = bluetooth::to_json(sent);
