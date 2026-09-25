@@ -1336,8 +1336,7 @@ namespace tether {
                             nlohmann::json event;
                             event["command"] = "bt_send_result";
                             event["thread"] = thread;
-                            if (!operation_id.empty())
-                                event["operation_id"] = operation_id;
+                            set_operation_id(event, operation_id);
                             event["success"] = bluetooth::send_message(thread, body, sent, err);
                             if (event["success"]) {
                                 nlohmann::json message = bluetooth::to_json(sent);
@@ -1670,21 +1669,22 @@ namespace tether {
                         std::string path = j["path"];
                         const std::string operation_id = j.value("operation_id", std::string{});
                         std::thread([path, operation_id]() {
+                            nlohmann::json resp;
+                            resp["command"] = "file_send_complete";
+                            set_operation_id(resp, operation_id);
                             Client local;
                             if (local.connect("", 0)) { // connects correctly via unix socket
                                 std::string err;
                                 bool ok = local.send_file(path, err);
-                                nlohmann::json resp;
-                                resp["command"] = "file_send_complete";
                                 resp["success"] = ok;
                                 resp["message"] =
                                     ok ? tr_format(_("Sent {}"), std::filesystem::path(path).filename().string())
                                        : tr_format(_("Send failed: {}"), err.empty() ? _("unknown error") : err);
-                                if (!operation_id.empty())
-                                    resp["operation_id"] = operation_id;
-
-                                broadcast_local_event(resp.dump());
+                            } else {
+                                resp["success"] = false;
+                                resp["message"] = tr_format(_("Send failed: {}"), _("Could not reach the Tether daemon."));
                             }
+                            broadcast_local_event(resp.dump());
                         }).detach();
                         continue; // skip the "OK\n" below because we reply asynchronously
                     }

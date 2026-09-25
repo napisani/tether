@@ -466,6 +466,25 @@ namespace {
             else
                 EXPECT_EQ(result.value("operation_id", ""), operation_id);
         }
+
+        // The subscribed socket stays open, but an oversized runtime path makes
+        // the worker's internal Client::connect fail without spawning a daemon.
+        {
+            ScopedEnvVar unconnectable_runtime("XDG_RUNTIME_DIR", runtime_dir + "/" + std::string(110, 'x'));
+            const std::string payload = nlohmann::json{{"command", "send_file"},
+                                                       {"path", runtime_dir + "/missing.txt"},
+                                                       {"operation_id", "web-connect-failure"}}
+                                            .dump() +
+                                        "\n";
+            ASSERT_EQ(write(client, payload.data(), payload.size()), static_cast<ssize_t>(payload.size()));
+            const std::string line = read_socket_line(client);
+            ASSERT_FALSE(line.empty()) << "internal connect failure must produce a terminal event";
+            const auto result = nlohmann::json::parse(line);
+            EXPECT_EQ(result.value("command", ""), "file_send_complete");
+            EXPECT_FALSE(result.value("success", true));
+            EXPECT_FALSE(result.value("message", "").empty());
+            EXPECT_EQ(result.value("operation_id", ""), "web-connect-failure");
+        }
         close(client);
     }
 
