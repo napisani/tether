@@ -1,0 +1,136 @@
+name: Experimental Ubuntu 26.04 container
+
+on:
+  push:
+    tags: ['tether-v0.2.37-experimental.ubuntu26.1']
+
+permissions:
+  contents: read
+
+env:
+  VERSION: 0.2.37-experimental.ubuntu26.1
+  IMAGE: ghcr.io/napisani/tether-core-experimental
+
+jobs:
+  build:
+    if: github.repository == 'napisani/tether' && github.ref == 'refs/tags/tether-v0.2.37-experimental.ubuntu26.1'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Red gate on current Ubuntu 24.04 distro package
+        shell: bash
+        run: |
+          [[ "$GITHUB_REF_NAME" == "tether-v$VERSION" ]]
+          docker run --rm --platform '${{ matrix.platform }}' -v "$PWD:/src:ro" ubuntu:24.04 bash -ec '
+            apt-get update
+            apt-get install -y --no-install-recommends bluez-obexd
+            set +e
+            bash /src/scripts/test-obex-package.sh > /gate.log 2>&1
+            status=$?
+            set -e
+            cat /gate.log
+            [[ $status == 42 ]]
+            grep -F "FAIL: bluez-obexd must be >= 5.84" /gate.log
+            printf "PASS: Ubuntu 24.04 package is rejected for the intended version assertion\n"
+          ' 2>&1 | tee "$RUNNER_TEMP/tether-red.log"
+      - name: Build tests and runtime on native architecture
+        shell: bash
+        run: |
+          docker build --progress=plain --platform '${{ matrix.platform }}' \
+            --build-arg TETHER_VERSION="$VERSION" --target test \
+            -f packaging/container/Dockerfile -t tether-tests:experimental . \
+            2>&1 | tee "$RUNNER_TEMP/tether-tests.log"
+          docker build --progress=plain --platform '${{ matrix.platform }}' \
+            --build-arg TETHER_VERSION="$VERSION" --target runtime \
+            --label "org.opencontainers.image.source=https://github.com/napisani/tether" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.version=$VERSION" \
+            -f packaging/container/Dockerfile -t "$IMAGE:$VERSION-${{ matrix.arch }}" . \
+            2>&1 | tee "$RUNNER_TEMP/tether-runtime.log"
+      - name: Green package gate and authenticated effective distro source evidence
+        shell: bash
+        run: |
+          image="$IMAGE:$VERSION-${{ matrix.arch }}"
+          docker run --rm --network none --entrypoint bash -v "$PWD:/src:ro" "$image" \
+            /src/scripts/test-obex-package.sh 2>&1 | tee "$RUNNER_TEMP/tether-package.log"
+          version=$(docker run --rm --network none --entrypoint dpkg-query "$image" -W -f='${Version}' bluez-obexd)
+          docker run --rm --platform '${{ matrix.platform }}' -v "$PWD:/src:ro" \
+            -e "EXPECTED_OBEX_VERSION=$version" ubuntu:26.04 bash -ec '
+              apt-get update
+              apt-get install -y --no-install-recommends python3
+              bash /src/scripts/test-obex-source-evidence.sh
+            ' 2>&1 | tee "$RUNNER_TEMP/tether-source.log"
+      - name: Existing container smoke tests without host hardware
+        shell: bash
+        run: |
+          bash -n packaging/container/entrypoint.sh packaging/container/healthcheck.sh scripts/test-container.sh
+          scripts/test-container.sh "$IMAGE:$VERSION-${{ matrix.arch }}" tether-tests:experimental \
+            2>&1 | tee "$RUNNER_TEMP/tether-smoke.log"
+      - name: Save tested runtime without publishing
+        run: docker save "$IMAGE:$VERSION-${{ matrix.arch }}" | gzip > "$RUNNER_TEMP/runtime-${{ matrix.arch }}.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu26-runtime-${{ matrix.arch }}
+          path: ${{ runner.temp }}/runtime-${{ matrix.arch }}.tar.gz
+          compression-level: 0
+          retention-days: 2
+      - name: Test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu26-evidence-${{ matrix.arch }}
+          path: ${{ runner.temp }}/tether-*.log
+          retention-days: 14
+
+  publish:
+    if: github.repository == 'napisani/tether' && github.ref == 'refs/tags/tether-v0.2.37-experimental.ubuntu26.1'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ubuntu26-runtime-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/runtimes
+      - name: Publish only tested images and isolated multiarch tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          [[ "$GITHUB_REF_NAME" == "tether-v$VERSION" ]]
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for arch in amd64 arm64; do
+            docker load -i "$RUNNER_TEMP/runtimes/runtime-$arch.tar.gz"
+            [[ $(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$IMAGE:$VERSION-$arch") == "$VERSION" ]]
+            [[ $(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE:$VERSION-$arch") == "$GITHUB_SHA" ]]
+            docker push "$IMAGE:$VERSION-$arch"
+          done
+          docker buildx imagetools create --tag "$IMAGE:$VERSION" "$IMAGE:$VERSION-amd64" "$IMAGE:$VERSION-arm64"
+          docker buildx imagetools inspect "$IMAGE:$VERSION"
+          docker buildx imagetools inspect --raw "$IMAGE:$VERSION" > "$RUNNER_TEMP/manifest.json"
+          python3 - "$RUNNER_TEMP/manifest.json" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1]))
+          assert {(m['platform']['os'], m['platform']['architecture']) for m in data['manifests']} == {('linux', 'amd64'), ('linux', 'arm64')}
+          print('PASS: published manifest contains exactly native amd64 and arm64')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu26-published-manifest
+          path: ${{ runner.temp }}/manifest.json
+          retention-days: 14
