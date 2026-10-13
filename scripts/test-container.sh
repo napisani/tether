@@ -98,6 +98,12 @@ docker exec "$app" bash -ec '
     test ! -e /usr/local/bin/tether-gtk
     test ! -e /usr/local/bin/tether-dialog
     test ! -e /usr/share/dbus-1/services/org.bluez.obex.service
+    # The supervised executable must be our tested backport, not the stock daemon.
+    test -f /usr/local/libexec/tether-obexd
+    test ! -L /usr/local/libexec/tether-obexd
+    sha256sum --check /usr/local/share/tether/obexd.sha256
+    grep -Fxq "Backport: 99abc8a9e1e1d256749e519a1758bf9a8576c468" /usr/local/share/tether/obex-build.txt
+    /usr/local/libexec/tether-obexd --help | grep -q -- --nodetach
     test -f /usr/local/share/locale/fr/LC_MESSAGES/tether.mo
     ! command -v g++
     ! command -v npm
