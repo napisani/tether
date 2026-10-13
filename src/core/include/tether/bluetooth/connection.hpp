@@ -13,6 +13,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <vector>
 
 namespace tether::bluetooth {
 
@@ -71,6 +72,10 @@ namespace tether::bluetooth {
         // Whether the phone has Hands-Free up.
         bool calls_available() const;
 
+        // The phone's recent calls, newest first: number, name, type
+        void set_call_history_handler(CallsFn on_history);
+        nlohmann::json call_history() const;
+
         nlohmann::json notifications(size_t limit = 50) const;
         ~ConnectionManager();
 
@@ -100,9 +105,12 @@ namespace tether::bluetooth {
     MessageStore& message_store();
     std::mutex& message_store_mutex();
 
-    // Marks a message read locally, and on the phone when MAP is currently
-    // serving it. Returns false only when the handle is unknown.
+    // Marks a message as read locally and on the phone (when MAP is up)
+    // Returns false only when the handle is unknown.
     bool mark_message_read(const std::string& handle, bool read, std::string& err_out, bool* synced_out = nullptr);
+
+    // Marks a batch read off the calling thread.
+    void mark_messages_read_async(std::vector<std::string> handles, bool read);
 
     // Sends a reply to a one-to-one conversation. Returns false with err_out set
     // when MAP is down, the thread cannot be replied to, or the phone refused.

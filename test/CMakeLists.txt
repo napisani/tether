@@ -1,5 +1,6 @@
 add_executable(tether_test
     test_base64.cpp
+    test_clipboard.cpp
     test_airpods.cpp
     test_audio.cpp
     test_bluetooth_objects.cpp
@@ -29,9 +30,11 @@ add_executable(tether_test
     test_otp.cpp
     test_paths.cpp
     test_message_format.cpp
+    test_tui_util.cpp
     test_service.cpp
     test_verbs.cpp
-    ../src/gtk/message_format.cpp
+    ../src/ui_common/message_format.cpp
+    ../src/tui/util.cpp
     ../src/cli/verbs.cpp
 )
 

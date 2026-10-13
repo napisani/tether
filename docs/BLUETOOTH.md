@@ -547,6 +547,14 @@ that has finished its call is exactly what a reclaim takes the buds from, and an
 `0x17` stays there until another host claims. The iPhone keeps the owner bit until another host
 claims, so ownership alone never means "still using them" either; that needs the audio source.
 
+**The owner bit is corroboration, not the decision.** It is dependable on some setups and not on
+others, and the difference is not visible from here. Measured 2026-09-15: on one machine the phone
+moves `0x05` idle to `0x07` owning on every handoff, exactly as the table says; in the log attached
+to #193 the same iOS version reports `0x05` while the audio-source notification names that phone as
+the host the buds are carrying media for -- either it never took ownership, or its host list was
+never refreshed, and the two are indistinguishable in a log that only records changes. What the buds
+carry, and for whom, is the audio-source notification, and that is what `peer_busy()` reads.
+
 The AC reference reads the low values as validation state instead (`0x00` validated,
 `0x01` pending, `0x02` unvalidated, `0x03` both, `0x05` a stuck session) and says ownership is not
 in this field. That does not match this hardware: our own entry alternates `0x00` and `0x02` in
@@ -701,10 +709,20 @@ the stem sets is the volume of whoever owns them.
 **It runs on what the other hosts report through the buds**, the smart-routing media reports
 above. No timer decides anything, and it does not need call control.
 
-- **A call on the phone gives the buds up** the moment the phone reports category `501`, before it
-  takes them. **Media on the phone gives them up** once the phone both reports it playing and owns
-  the buds (`AirPodsState::peer_busy()`): an iPhone playing on its own speaker does not take them
-  from a Mac, and does not take them from here.
+- **The phone gives the buds up once it is actually using them**, call or media alike: it reports
+  itself playing *and* the buds report their audio going to it (`AirPodsState::peer_busy()`,
+  `peer_holds_the_audio()`). Neither half decides alone -- an iPhone playing on its own speaker
+  reports the same media, and the owner bit answers nothing, having been seen idle on a phone the
+  buds were carrying media for.
+- **A call report is not a yield.** Announcing a call is not taking the buds. Tether held a version
+  that released on category `501` before the phone claimed; measured 2026-09-15 over four calls on
+  one iPhone, the two where Tether released first were the two where the buds never carried the
+  call -- no audio-source notification for the phone at all -- while the two where the phone claimed
+  first (`audioRoutingSetOwnershipToFalse`, owner bit to `0x07`) routed within a second. Releasing
+  early hands the phone a device whose owner has just vanished and whose transport is down. The
+  call report still holds *this* machine's claims back (`takes_over_for_play()`), and losing the
+  owner bit still pauses local playback on the spot, so nothing reaches the speakers while the
+  phone takes over.
 - **The phone reporting `NO` takes them back**, and resumes what the release paused.
 - **A player starting here takes them**, wherever they are, unless the phone is on a call. MPRIS
   `PropertiesChanged` drives it (`MediaControl::watch()`). With the card down the player is paused
@@ -912,9 +930,12 @@ checks the daemon does not make.
 | `systemctl enable --now tether-btclass@hci0` hangs in `activating (start)` forever | `btmgmt` epolls its stdin before running the command, and epoll rejects the `/dev/null` systemd hands it, so it waits having done nothing | Update the unit -- it pipes into `btmgmt` now. On an older build, `sudo btmgmt class 4 8` by hand sets the class until `bluetoothd` restarts, see 2026-09-01 below |
 | `systemctl enable --now tether-btclass@hci0` says `Unit tether-btclass@hci0.service does not exist` | A portable build (AppImage, Flatpak) installed no unit -- only the distro packages do | `tether --bt-setup` and run the command it prints, which writes the unit first, see 2026-09-05 below |
 | `tether-btclass@hci0` fails with `Invalid Index`, having worked for months | The controller re-enumerated -- a failed firmware handshake resets it over USB and it comes back as `hci1` -- so the instance name points at an adapter that no longer exists | Update the unit -- it resolves the adapter itself now and the instance name is only a hint, see 2026-09-11 below. By hand, `ls /sys/class/bluetooth` names the live adapter |
+| `tether --bt-setup` keeps printing the experimental step after the drop-in was applied and `bluetooth` restarted | Before 0.2.35 the check read `/proc`, which a Flatpak sandbox cannot see, and which `main.conf` `Experimental = true` never touches | Update. Confirm the flag itself with `busctl --system introspect org.bluez /org/bluez/hci0 \| grep AdvertisementMonitor` -- a hit means the experimental API is on, see 2026-09-20 below |
 | Messages and contacts worked, then stopped, and the error mentions a service record | `bluetoothd` restarted and reset the Class of Device | `sudo systemctl enable --now tether-btclass@hci0`, then re-pair if the phone dropped the bond |
 | The phone never offers notifications / Sync Contacts | The class is wrong, or the ANCS advertisement is not running | Check for `class=ok` in `tether --bt-status`, can take minutes |
 | MAP or PBAP reports `forbidden` | The matching toggle on the phone is off | Turn it on. This is not a pairing failure |
+| Contacts shows no favorites | **Phone Favorites** is off under the iPhone's Bluetooth settings for this computer | Turn it on, then reconnect the phone |
+| Calls tab shows no recent calls | **Phone Recents** is off under the iPhone's Bluetooth settings for this computer | Turn it on. History is pulled again after the next call ends |
 | Pairing never starts, and the only log line is a profile connect refused with `Connection refused (111)` | `Device1.Connect()` induces pairing only as a side effect of a profile connect, and this phone refuses that profile from an unbonded device | Nothing. Tether retries the transaction as an explicit `Device1.Pair()` on its own. To go straight there, `tether --bt-pair <addr> --explicit-pair` |
 | The phone shows a pairing code, then "Pairing Unsuccessful" a moment later, and the daemon reports the transaction failed about 90s after `confirm` | `tetherd` has no display, so the confirmation dialog could not be shown, and an unshowable dialog used to count as a refusal | Fixed. The comparison now goes to whichever client started the pairing -- the CLI prompts on the terminal, the GTK app opens its own dialog. On an older build, start `tetherd` from a graphical session so it inherits `DISPLAY` or `WAYLAND_DISPLAY` |
 | Pairing fails a few hundred ms after `confirm`, and `tetherd.log` says `tether-dialog: error while loading shared libraries: libgtk-layer-shell.so.0` | `tether-dialog` is linked against `gtk-layer-shell`, which the package did not depend on, so it died in the dynamic loader with exit 127 -- read as the user refusing | Install `gtk-layer-shell`. Fixed in the package dependencies, and a dialog that cannot run now routes the comparison to the client that started the pairing instead of declining it -- see 2026-08-29 below |
@@ -929,6 +950,7 @@ checks the daemon does not make.
 | Messages stopped after turning notification mirroring off | Fixed. The toggle used to restart supervision, which abandoned the MAP and PBAP sessions at obexd instead of removing them, and the iPhone serves one MAP session at a time | Nothing. Mirroring is switched in place now, and a dropped profile supervisor releases its sessions. On an older build, restart `tetherd` |
 | Notifications stopped and never came back, while messages and contacts kept working | Fixed. The bearer supervisor used to stop retrying LE after six attempts, and only a Classic drop or a daemon restart re-armed it | Nothing. The solicitation is kept on air whenever LE is down, which is what the iPhone answers -- see 2026-08-22 |
 | `tether --bt-status` reports `Bond: BR/EDR only` | The bond was made without cross-transport key derivation, so it has no LE half and can never carry ANCS | Forget this computer on the iPhone and pair again -- it can take more than one attempt, the derivation is flaky on identical inputs (2026-08-25). Check `secure-connections` in the same output first: re-pairing cannot help while it is off |
+| `tether --bt-status` reports `Bond: BR/EDR, notifications live` | BlueZ is too old for the bearer API (5.72 in #226), so it cannot show an LE half, but ANCS is subscribed and delivering | Nothing. The BR/EDR-only warning is held back while ANCS is live, and comes back while the phone is away |
 | Walked back into range and nothing reconnected for minutes | Fixed. The ANCS advert was gated on the Classic link, and the Classic backoff had no event that ended the absence | Nothing. The advert stays on air whenever LE is down, and an LE link coming up clears the Classic backoff -- see 2026-08-22 |
 | Startup logs `StartNotify not ready yet (InProgress)` for up to a minute | GATT discovery is still running on the new LE link | Nothing. It subscribes on its own. Only treat it as the 2026-08-19 hang if the LE link never comes up |
 | `tether --bt-connection` reports LE and messages up but `Notifications: no`, for hours | Fixed. The LE link was opened by the dial and carries no ANCS. A connected link used to take the solicitation off air, so the phone was never asked for the service | Nothing. The advert goes back on air over a link that has stayed up without ANCS -- see 2026-08-23. To clear it by hand on an older build, `tether --bt-solicit`; do not re-pair, and do not cycle the phone's Bluetooth |
@@ -1629,6 +1651,23 @@ The transfer object disappears from D-Bus the moment it finishes, so a vanished 
 is a normal terminal state rather than a failure (file may still take a bit to appear afterwards),
 which is why the pull waits instead of giving up. Contacts are staged in `$XDG_RUNTIME_DIR` rather than `/tmp`, since a
 phonebook is personal data.
+
+#### Call history (2026-10-08)
+
+With "Phone Favorites" and "Phone Recents" on, an iPhone 15 Pro served `cch`, `ich`, `och`,
+`mch` and `fav` over the same PBAP session, and refused `spd` with `Not Found`.
+
+- Each history card carries `X-IRMC-CALL-DATETIME;MISSED:20261007T111657`. The type is a
+  bare parameter rather than `TYPE=`, and the time is local with no zone.
+- `cch` comes back newest first, with missed, received and dialed calls mixed together.
+- 17 of 20 `cch` cards had an empty `FN`, so names are resolved against the `pb` pull by number.
+- `fav` returned 6 cards in the ordinary contact form, with no call fields. Tether pulls it
+  right after `pb` and marks the matching `pb` contacts, by number or email, as favorites.
+- Calls the iPhone blocks never reach HFP and are left out of its recents. Calls silenced
+  by "Silence Unknown Callers" show up in `cch` as missed.
+
+Tether pulls the 100 newest `cch` entries (`Fields: [N, FN, TEL, X-IRMC-CALL-DATETIME]`)
+when a PBAP session opens and again after each call ends. They are kept in memory only.
 
 ### The store at rest
 
@@ -3191,7 +3230,9 @@ the bearer step is a `sed` plus a restart through the machine's own service mana
 
 Not yet verified on hardware: that `class=ok` survives a `bluetoothd` restart on a machine
 without hostnamed. The `sed` leaves a `main.conf` with no `Class` or `Experimental` line,
-commented or not, unchanged, and `--bt-setup` keeps listing the step.
+commented or not, unchanged, and `--bt-setup` keeps listing the step. The experimental half of
+that last point is fixed in 2026-09-20 below: the flag is read off BlueZ now, whichever way it
+was set.
 
 ### 2026-09-11 - The AirPods sink jammed after a call
 
@@ -3559,3 +3600,74 @@ Also from orychalk (#85): a B-field threshold does not port (Pro 1 keeps an acti
 pod movements on Pro 3; and both buds out moves the volume target, hence the ear-return claim.
 
 Not yet verified on hardware: the whole of the above.
+
+### 2026-09-15 - An LE-only drop left notifications dead until a restart (#190)
+
+Reported in #190, and four times in our own `tetherd.log` on 0.2.31, which carries the 2026-09-12
+fix above:
+
+```
+09-13 15:02:24  ancs: Notification mirroring is active.
+09-13 15:10:16  Bearer.LE1 disconnected (Timeout)        BR/EDR stays up
+09-13 15:10:17  soliciting ANCS for 180s                 the supervisor saw LE go down
+                no ancs line for 2.5 hours
+```
+
+Same at 09-14 10:24, 19:52 and 21:55. Each ended only with a daemon restart, whose fresh client
+started a session within seconds, so LE was back and only the old subscription was dead. The
+cases that recovered (09-12 walk, 09-14 18:43 suspend) dropped both bearers.
+
+- The supervisor saw LE down: `ServicesResolved` goes false on an LE-only drop, so `le_link_up()`
+  short-circuits before the read.
+- `verify_subscription()` did not: it reads only the stale `Notifying` and the GAP read, and with
+  BR/EDR up that read does not answer `Not connected`. `ready` stayed latched, `hold` kept the
+  path, and nothing was ever rebuilt.
+- Tether never sent `StopNotify`. BlueZ keeps its notify client for our sender across the drop,
+  so a resubscribe would be a no-op on that registration; a restarted daemon is a new sender and
+  gets a real CCCD write.
+
+The ANCS client now drops the session on the `Disconnected` signal for `Bearer.LE1` or `Device1`
+(`BluezMonitor::le_drop_count()`), and `unsubscribe()` sends `StopNotify` on both sources before
+every rebuild.
+
+Not settled: the exact `ReadValue` error on the GAP characteristic with only BR/EDR up, and the
+fix itself on hardware (walk out until only `LE1` times out, come back, expect `LE link dropped`
+then a new session and a popup).
+
+### 2026-09-20 - `--bt-setup` kept printing the experimental step inside Flatpak (#206)
+
+Reported in #206: the drop-in `--bt-setup` printed was applied, `bluetooth` restarted, and the
+rerun under `flatpak run --command=tether com.tether.desktop --bt-setup` listed the same step.
+
+`bluetoothd` has no property for its own flags, so the check walked `/proc` for a process named
+`bluetoothd` and looked for `-E` / `--experimental`. Flatpak gives the app its own PID namespace:
+
+```
+$ flatpak run --command=sh <app> -c 'ls /proc | grep -c "^[0-9]*$"'
+4                       bwrap, sh, and the pipeline -- no bluetoothd, ever
+```
+
+So `experimental_api` was always false in the sandbox, and with nothing bonded yet to populate
+`Bearer.LE1` the resolver had no second source and pinned `BearerApi::Absent`. The same false
+negative hit every install method whenever the flag came from `main.conf` `Experimental = true`,
+which is what the non-systemd branch of the step itself tells users to do -- the open item left
+in the 2026-09-10 entry above.
+
+`bluetoothd` answers the question on its own bus. `btd_adv_monitor_manager_create()` runs only
+inside `if (g_dbus_get_flags() & G_DBUS_FLAG_ENABLE_EXPERIMENTAL)` (`src/adapter.c`, 5.87 and
+master), so `org.bluez.AdvertisementMonitorManager1` on an adapter object exists only with the
+experimental API on. It arrives in the `GetManagedObjects` reply already parsed, so detection
+costs no extra call, no cache, and no `/proc`, and `scan_bluetoothd_cmdline()` is gone.
+
+```
+$ busctl --system introspect org.bluez /org/bluez/hci0 | grep AdvertisementMonitor
+org.bluez.AdvertisementMonitorManager1  interface
+```
+
+Verified on this machine against the live bus: `experimental_api=1`, `bearer_api=Confirmed`,
+only the class step left. The marker is a BlueZ implementation detail, not API: if a later
+release creates the monitor manager unconditionally, this reads experimental where there is
+none, and the check moves to `Adapter1.ConnectDevice`, which is `GDBUS_EXPERIMENTAL_ASYNC_METHOD`
+and therefore absent from introspection without the flag.
+
+Not verified here: the negative case, which needs `bluetoothd` restarted without the flag.

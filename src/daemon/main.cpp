@@ -2,10 +2,10 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
-#include <string_view>
 #include <ctime>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <string_view>
 #include <sys/timerfd.h>
 #include <tether/audio.hpp>
 #include <tether/bluetooth/airpods.hpp>
@@ -145,6 +145,7 @@ int main(int argc, char** argv) {
                 }
                 payload["devices"].push_back(d);
             }
+            tether::set_discovered_devices(payload["devices"]);
             tether::broadcast_local_event(payload.dump());
         });
 
@@ -153,16 +154,16 @@ int main(int argc, char** argv) {
 
     tether::WaylandContext wayland_srv(loop);
     tether::g_wayland = &wayland_srv;
-    if (wayland_srv.init()) {
-        wayland_srv.set_clipboard_callback([](const std::string& text) {
-            nlohmann::json j;
-            j["command"] = "clipboard_updated";
-            j["content"] = text;
-            // replace bad UTF-8 instead of throwing; a clipboard
-            // app can still mislabel binary as text/plain. Don't abort the daemon.
-            tether::broadcast_message(j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
-        });
-    }
+    wayland_srv.set_clipboard_callback([](const std::string& text) {
+        nlohmann::json j;
+        j["command"] = "clipboard_updated";
+        j["content"] = text;
+        // replace bad UTF-8 instead of throwing; a clipboard
+        // app can still mislabel binary as text/plain. Don't abort the daemon.
+        tether::broadcast_message(j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
+    });
+    wayland_srv.set_clipboard_image_callback([](const std::string& png) { tether::broadcast_clipboard_image(png); });
+    wayland_srv.init();
 
     tether::FileReceiveManager file_mgr;
     tether::DesktopNotifier notifier;
@@ -177,12 +178,16 @@ int main(int argc, char** argv) {
     });
     tether::g_file_manager = &file_mgr;
 
-    notifier.set_copy_handler([&loop](const std::string& code) {
+    notifier.set_copy_handler([&loop](const std::string& code, const std::string& handle) {
         // libnotify dispatches actions on its own thread; the clipboard belongs to the loop.
         loop.post([code] {
             if (tether::g_wayland)
                 tether::g_wayland->copy_to_clipboard(code);
         });
+
+        // copying the code is having read the message
+        if (!handle.empty())
+            tether::bluetooth::mark_messages_read_async({handle}, true);
     });
 
     if (notifier_ready) {
@@ -249,17 +254,20 @@ int main(int argc, char** argv) {
                 tether::bluetooth::recipient_from_thread_key(message.thread_key, recipient, reply_error);
             notifier.notify({_("Messages"),
                              who.empty() ? "iPhone" : who,
-                             message.body,
+                             tether::popup_previews_enabled() ? message.body : std::string{},
                              tether::bluetooth::ancs::icon_candidates(as_notification),
                              false,
                              repliable ? message.thread_key : std::string{},
-                             otp});
+                             otp,
+                             "",
+                             message.handle});
         });
 
     auto bt_config = tether::bluetooth::load_config();
 
     tether::secret::set_retention(bt_config.retention);
     tether::set_desktop_popups_enabled(bt_config.desktop_popups_enabled);
+    tether::set_popup_previews_enabled(bt_config.popup_previews_enabled);
 
     // Pick the controller before the first capability, a second adapter never comes up bound to the wrong one.
     bluez.set_preferred_adapter(bt_config.adapter);
@@ -658,7 +666,7 @@ int main(int argc, char** argv) {
                     const std::string body = notification.body.empty() ? notification.subtitle : notification.body;
                     notifier.notify({notification.app_name,
                                      title.empty() ? "iPhone" : title,
-                                     body,
+                                     tether::popup_previews_enabled() ? body : std::string{},
                                      tether::bluetooth::ancs::icon_candidates(notification),
                                      notification.silent,
                                      "",
@@ -679,6 +687,13 @@ int main(int argc, char** argv) {
             nlohmann::json event;
             event["command"] = "bt_calls";
             event["calls"] = calls;
+            tether::broadcast_local_event(event.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
+        });
+
+        connections.set_call_history_handler([](const nlohmann::json& history) {
+            nlohmann::json event;
+            event["command"] = "bt_call_history";
+            event["calls"] = history;
             tether::broadcast_local_event(event.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
         });
 

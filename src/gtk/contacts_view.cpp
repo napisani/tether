@@ -18,7 +18,9 @@ namespace tether::ui {
             std::string search_needle;
             std::string shown;
             bool visible = false;
+            bool calls_available = false;
             void (*open_thread)(const std::string&) = nullptr;
+            void (*start_call)(const std::string&) = nullptr;
         };
 
         ContactsState g_contacts;
@@ -42,14 +44,6 @@ namespace tether::ui {
         void on_search_changed(GtkSearchEntry* entry, gpointer) {
             g_contacts.search_needle = fold(gtk_entry_get_text(GTK_ENTRY(entry)));
             gtk_list_box_invalidate_filter(GTK_LIST_BOX(g_contacts.list));
-        }
-
-        // Addresses arrive namespaced the way thread keys are. The prefix is
-        // what makes them sendable, so it is kept on the button and stripped
-        // only for display.
-        std::string display_address(const std::string& key) {
-            const size_t colon = key.find(':');
-            return colon == std::string::npos ? key : key.substr(colon + 1);
         }
 
         const char* stashed(GtkWidget* widget) {
@@ -115,6 +109,19 @@ namespace tether::ui {
                                                        g_contacts.open_thread(stashed(GTK_WIDGET(button)));
                                                }));
             gtk_box_pack_end(GTK_BOX(box), message, FALSE, FALSE, 0);
+
+            if (is_tel && g_contacts.calls_available) {
+                GtkWidget* call = action_button("call-start-symbolic",
+                                                display_address(key),
+                                                _("Call"),
+                                                // TRANSLATORS: Spoken name of the call button beside a phone number.
+                                                tether::tr_format(_("Call {}"), display_address(key)),
+                                                G_CALLBACK(+[](GtkButton* button, gpointer) {
+                                                    if (g_contacts.start_call)
+                                                        g_contacts.start_call(stashed(GTK_WIDGET(button)));
+                                                }));
+                gtk_box_pack_end(GTK_BOX(box), call, FALSE, FALSE, 0);
+            }
             return box;
         }
 
@@ -156,7 +163,16 @@ namespace tether::ui {
             gtk_label_set_xalign(GTK_LABEL(title), 0.0);
             gtk_label_set_ellipsize(GTK_LABEL(title), PANGO_ELLIPSIZE_END);
             gtk_label_set_max_width_chars(GTK_LABEL(title), 28);
-            gtk_expander_set_label_widget(GTK_EXPANDER(expander), title);
+            GtkWidget* identity = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
+            gtk_box_pack_start(GTK_BOX(identity), avatar(name), FALSE, FALSE, 0);
+            gtk_box_pack_start(GTK_BOX(identity), title, TRUE, TRUE, 0);
+            if (contact.value("favorite", false)) {
+                GtkWidget* star = gtk_image_new_from_icon_name("starred-symbolic", GTK_ICON_SIZE_BUTTON);
+                gtk_widget_set_tooltip_text(star, _("Favorite"));
+                set_accessible_name(star, _("Favorite"));
+                gtk_box_pack_start(GTK_BOX(identity), star, FALSE, FALSE, 0);
+            }
+            gtk_expander_set_label_widget(GTK_EXPANDER(expander), identity);
 
             GtkWidget* addresses = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
             gtk_widget_set_margin_top(addresses, 6);
@@ -214,23 +230,27 @@ namespace tether::ui {
     }
 
     bool contacts_view_handle_event(const nlohmann::json& event) {
-        if (event.value("command", "") == "bt_contacts")
+        const std::string command = event.value("command", "");
+        if (command == "bt_contacts")
             show_contacts(event);
+        else if (command == "bt_connection_changed") {
+            const auto& calls = event.contains("calls") ? event["calls"] : nlohmann::json();
+            g_contacts.calls_available = calls.is_object() && calls.value("available", false);
+        }
         return false;
     }
 
-    GtkWidget* contacts_view_new(void (*open_thread)(const std::string& thread_key)) {
+    GtkWidget* contacts_view_new(void (*open_thread)(const std::string& thread_key),
+                                 void (*start_call)(const std::string& number)) {
         g_contacts.open_thread = open_thread;
+        g_contacts.start_call = start_call;
         g_contacts.stack = gtk_stack_new();
 
         GtkWidget* status_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
         gtk_widget_set_valign(status_box, GTK_ALIGN_CENTER);
+        style(status_box, "tether-empty");
         gtk_widget_set_halign(status_box, GTK_ALIGN_CENTER);
-        gtk_box_pack_start(GTK_BOX(status_box),
-                           gtk_image_new_from_icon_name("avatar-default-symbolic", GTK_ICON_SIZE_DIALOG),
-                           FALSE,
-                           FALSE,
-                           0);
+        gtk_box_pack_start(GTK_BOX(status_box), navigation_icon("contacts", 56), FALSE, FALSE, 0);
         g_contacts.status_label = gtk_label_new(_("No contacts yet. Check the Bluetooth link on the Devices page."));
         gtk_label_set_line_wrap(GTK_LABEL(g_contacts.status_label), TRUE);
         gtk_label_set_justify(GTK_LABEL(g_contacts.status_label), GTK_JUSTIFY_CENTER);
@@ -243,9 +263,9 @@ namespace tether::ui {
         g_contacts.search_entry = gtk_search_entry_new();
         gtk_entry_set_placeholder_text(GTK_ENTRY(g_contacts.search_entry), _("Search contacts"));
         set_accessible_name(g_contacts.search_entry, _("Search contacts"));
-        gtk_widget_set_margin_top(g_contacts.search_entry, 8);
-        gtk_widget_set_margin_start(g_contacts.search_entry, 8);
-        gtk_widget_set_margin_end(g_contacts.search_entry, 8);
+        gtk_widget_set_margin_top(g_contacts.search_entry, 24);
+        gtk_widget_set_margin_start(g_contacts.search_entry, 24);
+        gtk_widget_set_margin_end(g_contacts.search_entry, 24);
         g_signal_connect(g_contacts.search_entry, "search-changed", G_CALLBACK(on_search_changed), nullptr);
         g_signal_connect(g_contacts.search_entry,
                          "stop-search",
@@ -256,6 +276,7 @@ namespace tether::ui {
         GtkWidget* scroll = gtk_scrolled_window_new(nullptr, nullptr);
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
         g_contacts.list = gtk_list_box_new();
+        gtk_style_context_add_class(gtk_widget_get_style_context(g_contacts.list), "tether-feed");
         gtk_list_box_set_selection_mode(GTK_LIST_BOX(g_contacts.list), GTK_SELECTION_NONE);
         gtk_list_box_set_filter_func(GTK_LIST_BOX(g_contacts.list), contact_visible, nullptr, nullptr);
         gtk_container_add(GTK_CONTAINER(scroll), g_contacts.list);

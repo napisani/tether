@@ -8,6 +8,7 @@
 #include <gio/gio.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -15,6 +16,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "tether/base64.hpp"
 #include "tether/bluetooth/airpods.hpp"
 #include "tether/bluetooth/config.hpp"
 #include "tether/bluetooth/connection.hpp"
@@ -35,6 +37,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -54,7 +57,8 @@ namespace tether {
 
     struct ClientSession {
         int fd;
-        SSL* ssl; // nullptr for plain unix clients
+        SSL* ssl;                      // nullptr for plain unix clients
+        bool clipboard_images = false; // announced in hello
     };
 
     // Global list of active connected sessions
@@ -62,6 +66,10 @@ namespace tether {
     static std::mutex g_sessions_mutex;
     static std::set<int> local_subscribers;
     static std::mutex g_subscribers_mutex;
+
+    // last known mdns peers.
+    static std::mutex g_discovered_mutex;
+    static nlohmann::json g_discovered_devices = nlohmann::json::array();
 
     struct ReceivedFileInfo {
         std::string path;
@@ -161,6 +169,11 @@ namespace tether {
         broadcast_local_event(make_otp_event({code, sender_domain, id}).dump(), exclude_fd);
     }
 
+    void set_discovered_devices(const nlohmann::json& devices) {
+        std::lock_guard<std::mutex> lock(g_discovered_mutex);
+        g_discovered_devices = devices.is_array() ? devices : nlohmann::json::array();
+    }
+
     void register_local_subscriber(int fd) {
         std::lock_guard<std::mutex> lock(g_subscribers_mutex);
         local_subscribers.insert(fd);
@@ -171,24 +184,36 @@ namespace tether {
         local_subscribers.erase(fd);
     }
 
-    // Helper for robust SSL writes on non-blocking sockets.
-    // Handles SSL_ERROR_WANT_WRITE by retrying.
+    // Writes all of buf on a non-blocking SSL socket, retrying WANT_WRITE. Runs on the
+    // event loop, so a peer that stops reading must not hold it: after ~5 s without
+    // progress the socket is shut down, and the loop's read path drops the session.
     static int robust_ssl_write(SSL* ssl, const void* buf, int num) {
         if (!ssl)
             return -1;
+        constexpr int STALL_LIMIT = 5000;
         int total_written = 0;
+        int stalls = 0;
         const char* p = static_cast<const char*>(buf);
         while (total_written < num) {
             int n = SSL_write(ssl, p + total_written, num - total_written);
             if (n <= 0) {
                 int err = SSL_get_error(ssl, n);
                 if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
-                    usleep(1000); // Yield to avoid busy-wait
+                    if (++stalls > STALL_LIMIT) {
+                        const int fd = SSL_get_fd(ssl);
+                        debug::log(
+                            ERR, "net: ssl fd {} is not draining; {} of {} bytes written", fd, total_written, num);
+                        // A partial TLS record leaves the stream unusable.
+                        shutdown(fd, SHUT_RDWR);
+                        return -1;
+                    }
+                    usleep(1000);
                     continue;
                 }
                 return n; // Fatal error
             }
             total_written += n;
+            stalls = 0;
         }
         return total_written;
     }
@@ -282,27 +307,66 @@ namespace tether {
         }
     }
 
-    static nlohmann::json load_pending_pairs() {
-        std::string pending_path = get_runtime_dir() + "/pending_pairs.json";
-        nlohmann::json pending = nlohmann::json::object();
-
-        std::ifstream ifs(pending_path);
-        if (!ifs.is_open()) {
-            return pending;
-        }
-
-        try {
-            pending = nlohmann::json::parse(ifs);
-        } catch (...) {
-            pending = nlohmann::json::object();
-        }
-
-        return pending;
-    }
+    // How long an unanswered pairing request stays offerable.
+    static constexpr int64_t PENDING_PAIR_TTL_SECONDS = 3600;
 
     static void save_pending_pairs(const nlohmann::json& pending) {
         std::ofstream ofs(get_runtime_dir() + "/pending_pairs.json");
         ofs << pending.dump(4);
+    }
+
+    nlohmann::json prune_pending_pairs(const nlohmann::json& raw, int64_t now) {
+        nlohmann::json live = nlohmann::json::object();
+        if (!raw.is_object())
+            return live;
+
+        for (const auto& [fingerprint, value] : raw.items()) {
+            if (value.is_string()) {
+                live[fingerprint] = {{"name", value.get<std::string>()}, {"ts", now}};
+                continue;
+            }
+            if (!value.is_object() || !value.contains("name"))
+                continue;
+            if (now - value.value("ts", static_cast<int64_t>(0)) > PENDING_PAIR_TTL_SECONDS)
+                continue;
+            live[fingerprint] = value;
+        }
+        return live;
+    }
+
+    // Expired entries are dropped on read rather than on a timer.
+    static nlohmann::json load_pending_pairs() {
+        std::ifstream ifs(get_runtime_dir() + "/pending_pairs.json");
+        if (!ifs.is_open())
+            return nlohmann::json::object();
+
+        nlohmann::json raw;
+        try {
+            raw = nlohmann::json::parse(ifs);
+        } catch (...) {
+            return nlohmann::json::object();
+        }
+        ifs.close();
+
+        nlohmann::json live = prune_pending_pairs(raw, static_cast<int64_t>(std::time(nullptr)));
+        if (live.size() != raw.size() || live != raw)
+            save_pending_pairs(live);
+        return live;
+    }
+
+    static std::string pending_pair_name(const nlohmann::json& pending, const std::string& fingerprint) {
+        if (!pending.contains(fingerprint))
+            return "";
+        return pending[fingerprint].value("name", "");
+    }
+
+    // A request that was answered, or whose peer has gone, is not pending.
+    static void erase_pending_pair(const std::string& fingerprint) {
+        auto pending = load_pending_pairs();
+        if (!pending.contains(fingerprint))
+            return;
+        pending.erase(fingerprint);
+        save_pending_pairs(pending);
     }
 
     static std::string lookup_known_host_name(const std::string& fingerprint) {
@@ -327,22 +391,23 @@ namespace tether {
     }
 
     nlohmann::json build_protocol_info() {
-        return {{"command", "protocol_info"},
-                {"version", 1},
-                {"capabilities",
-                 {"airpods",
-                  "bluetooth.connection",
-                  "bluetooth.diagnostics",
-                  "bluetooth.pairing",
-                  "calls",
-                  "clipboard",
-                  "contacts",
-                  "files",
-                  "messages",
-                  "notifications",
-                  "otp",
-                  "peers",
-                  "settings"}}};
+        nlohmann::json capabilities = {"airpods",
+                                       "bluetooth.connection",
+                                       "bluetooth.diagnostics",
+                                       "bluetooth.pairing",
+                                       "contacts",
+                                       "files",
+                                       "messages",
+                                       "notifications",
+                                       "otp",
+                                       "peers",
+                                       "settings"};
+        const auto config = bluetooth::load_config();
+        if (config.calls_enabled && bluetooth::g_bluez && bluetooth::g_bluez->running())
+            capabilities.push_back("calls");
+        if (g_wayland && g_wayland->clipboard_available())
+            capabilities.push_back("clipboard");
+        return {{"command", "protocol_info"}, {"version", 1}, {"capabilities", std::move(capabilities)}};
     }
 
     nlohmann::json build_bt_status() {
@@ -359,6 +424,7 @@ namespace tether {
         status["retention"] = to_string(config.retention);
         status["retention_ready"] = secret::have_key();
         status["desktop_popups_enabled"] = config.desktop_popups_enabled;
+        status["popup_previews_enabled"] = config.popup_previews_enabled;
         status["airpods_enabled"] = config.airpods_enabled;
         status["airpods_pause"] = to_string(config.airpods_pause);
         status["airpods_handoff"] = config.airpods_handoff;
@@ -388,6 +454,12 @@ namespace tether {
     bool desktop_popups_enabled() { return g_desktop_popups_enabled.load(); }
 
     void set_desktop_popups_enabled(bool enabled) { g_desktop_popups_enabled.store(enabled); }
+
+    static std::atomic<bool> g_popup_previews_enabled{true};
+
+    bool popup_previews_enabled() { return g_popup_previews_enabled.load(); }
+
+    void set_popup_previews_enabled(bool enabled) { g_popup_previews_enabled.store(enabled); }
 
     static std::atomic<bool> g_mdns_available{false};
 
@@ -632,9 +704,8 @@ namespace tether {
 
     static void run_bt_unpair(const std::string& address, const std::string& operation_id) {
         if (!bluetooth::g_bluez) {
-            nlohmann::json event{{"command", "bt_unpair_result"},
-                                 {"success", false},
-                                 {"message", _("Bluetooth is unavailable.")}};
+            nlohmann::json event{
+                {"command", "bt_unpair_result"}, {"success", false}, {"message", _("Bluetooth is unavailable.")}};
             set_operation_id(event, operation_id);
             broadcast_local_event(event.dump());
             return;
@@ -742,6 +813,7 @@ namespace tether {
             for (const auto& card : bluetooth::contact_store().search(query, limit)) {
                 nlohmann::json entry;
                 entry["name"] = card.name;
+                entry["favorite"] = card.favorite;
                 // Namespaced the same way threads are, so an address here can be
                 // handed straight back as the thread of a bt_send_message.
                 nlohmann::json addresses = nlohmann::json::array();
@@ -798,10 +870,11 @@ namespace tether {
 
         nlohmann::json pending_pairs = nlohmann::json::array();
         auto pending = load_pending_pairs();
-        for (auto& [fingerprint, name_value] : pending.items()) {
+        for (auto& [fingerprint, entry] : pending.items()) {
             nlohmann::json item;
             item["fingerprint"] = fingerprint;
-            item["device_name"] = name_value.is_string() ? name_value.get<std::string>() : "Unknown Device";
+            const std::string name = entry.value("name", "");
+            item["device_name"] = name.empty() ? "Unknown Device" : name;
             pending_pairs.push_back(item);
         }
         snapshot["pending_pairs"] = pending_pairs;
@@ -824,6 +897,11 @@ namespace tether {
             item["filename"] = file.filename;
             item["bytes_written"] = file.bytes_written;
             snapshot["recent_received_files"].push_back(item);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_discovered_mutex);
+            snapshot["discovered_devices"] = g_discovered_devices;
         }
 
         snapshot["mdns_available"] = g_mdns_available.load();
@@ -868,6 +946,98 @@ namespace tether {
         }
 
         return recipients;
+    }
+
+    std::vector<std::string> clipboard_image_messages(const std::string& png, const std::string& kind) {
+        constexpr size_t CHUNK_BYTES = 512 * 1024;
+        if (png.size() > CLIPBOARD_IMAGE_MAX_BYTES) {
+            debug::log(WARN, "clipboard image of {} bytes exceeds the transfer cap; not sent", png.size());
+            return {};
+        }
+        if (png.empty())
+            return {};
+
+        static std::atomic<unsigned> seq{0};
+        const std::string id = "clip_" + std::to_string(time(nullptr)) + "_" + std::to_string(seq++);
+
+        nlohmann::json start{{"command", "file_start"}, {"filename", "clipboard.png"}, {"transfer_id", id}};
+        start["size"] = png.size();
+        start["clipboard"] = kind;
+        std::vector<std::string> out{start.dump()};
+        for (size_t off = 0, idx = 0; off < png.size(); off += CHUNK_BYTES, ++idx) {
+            const size_t len = std::min(CHUNK_BYTES, png.size() - off);
+            nlohmann::json chunk{{"command", "file_chunk"}, {"transfer_id", id}, {"chunk_index", idx}};
+            chunk["data"] = base64_encode(reinterpret_cast<const unsigned char*>(png.data() + off), len);
+            out.push_back(chunk.dump());
+        }
+        out.push_back(nlohmann::json{{"command", "file_end"}, {"transfer_id", id}}.dump());
+        return out;
+    }
+
+    void broadcast_clipboard_image(const std::string& png, int exclude_fd) {
+        const auto msgs = clipboard_image_messages(png, "updated");
+        std::lock_guard<std::mutex> lock(g_sessions_mutex);
+        for (auto const& [fd, session] : active_sessions) {
+            if (fd == exclude_fd || !session.ssl || !session.clipboard_images)
+                continue;
+            for (const auto& m : msgs) {
+                const std::string packet = m + "\n";
+                robust_ssl_write(session.ssl, packet.c_str(), packet.size());
+            }
+        }
+    }
+
+    bool session_accepts_clipboard_images(int fd) {
+        std::lock_guard<std::mutex> lock(g_sessions_mutex);
+        auto it = active_sessions.find(fd);
+        return it != active_sessions.end() && it->second.clipboard_images;
+    }
+
+    static void set_session_clipboard_images(int fd) {
+        std::lock_guard<std::mutex> lock(g_sessions_mutex);
+        if (auto it = active_sessions.find(fd); it != active_sessions.end())
+            it->second.clipboard_images = true;
+    }
+
+    bool ClipboardImageReceiver::start(const std::string& transfer_id, size_t size) {
+        id_.clear();
+        data_.clear();
+        if (transfer_id.empty() || size == 0 || size > CLIPBOARD_IMAGE_MAX_BYTES) {
+            debug::log(WARN, "clipboard image of {} bytes rejected", size);
+            return false;
+        }
+        id_ = transfer_id;
+        expected_ = size;
+        data_.reserve(size);
+        return true;
+    }
+
+    bool ClipboardImageReceiver::chunk(const std::string& transfer_id, const std::string& b64_data) {
+        if (id_.empty() || transfer_id != id_)
+            return false;
+        auto bytes = base64_decode(b64_data);
+        if (data_.size() + bytes.size() > expected_) {
+            debug::log(WARN, "clipboard image overran its declared size; dropped");
+            id_.clear();
+            data_.clear();
+            return true;
+        }
+        data_.append(bytes.begin(), bytes.end());
+        return true;
+    }
+
+    std::string ClipboardImageReceiver::finish(const std::string& transfer_id) {
+        if (id_.empty() || transfer_id != id_)
+            return {};
+        id_.clear();
+        std::string png = std::move(data_);
+        data_.clear();
+        static constexpr std::string_view PNG_SIGNATURE{"\x89PNG\r\n\x1a\n", 8};
+        if (png.size() != expected_ || !png.starts_with(PNG_SIGNATURE)) {
+            debug::log(WARN, "clipboard image incomplete or not a PNG; dropped");
+            return {};
+        }
+        return png;
     }
 
     std::string get_runtime_dir() {
@@ -927,7 +1097,7 @@ namespace tether {
     UnixServer::~UnixServer() { stop(); }
 
     bool UnixServer::start() {
-        server_fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
+        server_fd_ = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (server_fd_ < 0) {
             debug::log(ERR, "Failed to create unix socket");
             return false;
@@ -990,7 +1160,7 @@ namespace tether {
     }
 
     void UnixServer::handle_accept(int fd) {
-        int client_fd = accept(fd, nullptr, nullptr);
+        int client_fd = accept4(fd, nullptr, nullptr, SOCK_CLOEXEC);
         if (client_fd < 0) {
             if (errno != EAGAIN && errno != EWOULDBLOCK) {
                 debug::log(ERR, "UnixServer accept error: {}", std::strerror(errno));
@@ -1172,46 +1342,21 @@ namespace tether {
                         } else if (j["handle"].is_string()) {
                             handles.push_back(j["handle"].get<std::string>());
                         }
-                        const bool read = j.value("read", true);
-
-                        if (!handles.empty()) {
-                            std::thread([handles, read]() {
-                                int changed = 0;
-                                int synced = 0;
-                                std::string last_err;
-                                for (const auto& handle : handles) {
-                                    std::string err;
-                                    bool handle_synced = false;
-                                    if (bluetooth::mark_message_read(handle, read, err, &handle_synced))
-                                        ++changed;
-                                    if (handle_synced)
-                                        ++synced;
-                                    if (!err.empty())
-                                        last_err = err;
-                                }
-                                nlohmann::json event;
-                                event["command"] = "bt_message_read";
-                                event["handles"] = handles;
-                                event["read"] = read;
-                                event["success"] = changed > 0;
-                                event["synced"] = synced;
-                                if (!last_err.empty())
-                                    event["message"] = last_err;
-                                broadcast_local_event(event.dump());
-                            }).detach();
-                        }
+                        bluetooth::mark_messages_read_async(std::move(handles), j.value("read", true));
                     } else if (j.contains("command") && j["command"] == "bt_send_message" && j.contains("thread") &&
                                j.contains("body")) {
                         std::string thread = j["thread"];
                         std::string body = j["body"];
+                        const std::string operation_id = j.value("operation_id", std::string{});
                         // PushMessage is a blocking OBEX transfer, so it cannot
                         // run on the loop that has to keep serving the UI.
-                        std::thread([thread, body]() {
+                        std::thread([thread, body, operation_id]() {
                             std::string err;
                             bluetooth::Message sent;
                             nlohmann::json event;
                             event["command"] = "bt_send_result";
                             event["thread"] = thread;
+                            set_operation_id(event, operation_id);
                             event["success"] = bluetooth::send_message(thread, body, sent, err);
                             if (event["success"]) {
                                 nlohmann::json message = bluetooth::to_json(sent);
@@ -1311,10 +1456,24 @@ namespace tether {
                         bluetooth::save_config(config);
                         set_desktop_popups_enabled(config.desktop_popups_enabled);
                         broadcast_local_event(build_bt_status().dump());
+                    } else if (j.contains("command") && j["command"] == "set_popup_previews") {
+                        auto config = bluetooth::load_config();
+                        config.popup_previews_enabled = j.value("enabled", true);
+                        bluetooth::save_config(config);
+                        set_popup_previews_enabled(config.popup_previews_enabled);
+                        broadcast_local_event(build_bt_status().dump());
                     } else if (j.contains("command") && j["command"] == "bt_list_calls") {
                         nlohmann::json payload;
                         payload["command"] = "bt_calls";
                         payload["calls"] = bluetooth::g_bt_connections ? bluetooth::g_bt_connections->calls()
+                                                                       : nlohmann::json::array();
+                        std::string out = payload.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) + "\n";
+                        write_plain_packet(client_fd, out);
+                        continue;
+                    } else if (j.contains("command") && j["command"] == "bt_list_call_history") {
+                        nlohmann::json payload;
+                        payload["command"] = "bt_call_history";
+                        payload["calls"] = bluetooth::g_bt_connections ? bluetooth::g_bt_connections->call_history()
                                                                        : nlohmann::json::array();
                         std::string out = payload.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) + "\n";
                         write_plain_packet(client_fd, out);
@@ -1422,10 +1581,14 @@ namespace tether {
                             continue;
                         }
                     } else if (j.contains("command") && j["command"] == "clipboard_send") {
+                        const std::string image = g_wayland ? g_wayland->get_clipboard_image() : std::string{};
+                        if (!image.empty())
+                            broadcast_clipboard_image(image);
                         nlohmann::json resp;
                         resp["command"] = "clipboard_content";
                         resp["content"] = g_wayland ? g_wayland->get_clipboard() : std::string{};
-                        if (!resp["content"].get_ref<const std::string&>().empty()) {
+                        // with an image selected the cached text is stale don't push it
+                        if (image.empty() && !resp["content"].get_ref<const std::string&>().empty()) {
                             nlohmann::json bc;
                             bc["command"] = "clipboard_updated";
                             bc["content"] = resp["content"];
@@ -1533,24 +1696,30 @@ namespace tether {
                                 }
                                 payload["devices"].push_back(d);
                             }
+                            set_discovered_devices(payload["devices"]);
                             broadcast_local_event(payload.dump());
                         }).detach();
                     } else if (j.contains("command") && j["command"] == "send_file" && j.contains("path")) {
                         std::string path = j["path"];
-                        std::thread([path]() {
+                        const std::string operation_id = j.value("operation_id", std::string{});
+                        std::thread([path, operation_id]() {
+                            nlohmann::json resp;
+                            resp["command"] = "file_send_complete";
+                            set_operation_id(resp, operation_id);
                             Client local;
                             if (local.connect("", 0)) { // connects correctly via unix socket
                                 std::string err;
                                 bool ok = local.send_file(path, err);
-                                nlohmann::json resp;
-                                resp["command"] = "file_send_complete";
                                 resp["success"] = ok;
                                 resp["message"] =
                                     ok ? tr_format(_("Sent {}"), std::filesystem::path(path).filename().string())
                                        : tr_format(_("Send failed: {}"), err.empty() ? _("unknown error") : err);
-
-                                broadcast_local_event(resp.dump());
+                            } else {
+                                resp["success"] = false;
+                                resp["message"] =
+                                    tr_format(_("Send failed: {}"), _("Could not reach the Tether daemon."));
                             }
+                            broadcast_local_event(resp.dump());
                         }).detach();
                         continue; // skip the "OK\n" below because we reply asynchronously
                     }
@@ -1582,7 +1751,10 @@ namespace tether {
 
     // Binds and listens on the wildcard address of `family`. AF_INET6 socket dual-stack.
     static int bind_listen_socket(int family, int port) {
-        int fd = socket(family, SOCK_STREAM, 0);
+        // CLOEXEC: the pairing dialog is fork+exec'd from this process and must
+        // not inherit the listening socket, or it keeps the port bound and
+        // SO_REUSEPORT hands it connections it will never accept.
+        int fd = socket(family, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (fd < 0)
             return -1;
 
@@ -1672,6 +1844,7 @@ namespace tether {
         }
 
         client_buffers_.erase(fd);
+        clipboard_images_.erase(fd);
         ssl_handshake_complete_.erase(fd);
         client_paired_.erase(fd);
         client_info_.erase(fd);
@@ -1681,6 +1854,18 @@ namespace tether {
         unregister_client_fd(fd);
         loop_.removeFd(fd);
         close(fd);
+    }
+
+    // Drops peers that vanish without FIN/RST: keepalive covers idle sessions (~90 s),
+    // TCP_USER_TIMEOUT covers sessions with unacked data queued (30 s).
+    static void enable_dead_peer_detection(int fd) {
+        int on = 1, idle = 60, interval = 10, count = 3;
+        unsigned int user_timeout_ms = 30000;
+        setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count));
+        setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout_ms, sizeof(user_timeout_ms));
     }
 
     // Text form of an accepted peer.
@@ -1705,13 +1890,14 @@ namespace tether {
     void TcpServer::handle_accept(int fd) {
         sockaddr_storage client_addr{};
         socklen_t addrlen = sizeof(client_addr);
-        int client_fd = accept(fd, reinterpret_cast<sockaddr*>(&client_addr), &addrlen);
+        int client_fd = accept4(fd, reinterpret_cast<sockaddr*>(&client_addr), &addrlen, SOCK_CLOEXEC);
         if (client_fd < 0)
             return;
 
         // Set non-blocking
         int flags = fcntl(client_fd, F_GETFL, 0);
         fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+        enable_dead_peer_detection(client_fd);
 
         const std::string ip = peer_ip(client_addr, addrlen);
         debug::log(INFO, "TcpServer: New connection from {} (fd: {})", ip, client_fd);
@@ -1856,6 +2042,7 @@ namespace tether {
 
         int flags = fcntl(fd, F_GETFL, 0);
         fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        enable_dead_peer_detection(fd);
 
         debug::log(INFO, "TcpServer: Dialled {} (fd: {})", host, fd);
 
@@ -1892,6 +2079,18 @@ namespace tether {
             if (ret == 1) {
                 ssl_handshake_complete_[client_fd] = true;
                 std::string print = Crypto::get_peer_fingerprint(ssl);
+                // mDNS TXT records are unauthenticated: a dial made for a fingerprint must
+                // reach that certificate, or the peer's own pair_accepted would pin an impostor.
+                const std::string expected = connected_remote_clients[client_fd].fingerprint;
+                if (initiated && !expected.empty() && print != expected) {
+                    debug::log(ERR,
+                               "TcpServer: {} presented {} but was dialled for {}; dropping",
+                               client_info_[client_fd].address,
+                               print,
+                               expected);
+                    drop_client(client_fd);
+                    return;
+                }
                 client_info_[client_fd].fingerprint = print;
                 connected_remote_clients[client_fd].fingerprint = print;
                 if (Crypto::instance().is_host_known(print)) {
@@ -2041,19 +2240,9 @@ namespace tether {
 
                             // Persist the pending request so accept_device can retrieve the name
                             {
-                                std::string pending_path = get_runtime_dir() + "/pending_pairs.json";
-                                nlohmann::json pending;
-                                std::ifstream ifs(pending_path);
-                                if (ifs.is_open()) {
-                                    try {
-                                        pending = nlohmann::json::parse(ifs);
-                                    } catch (...) {
-                                    }
-                                    ifs.close();
-                                }
-                                pending[print] = dev_name;
-                                std::ofstream ofs(pending_path);
-                                ofs << pending.dump(4);
+                                auto pending = load_pending_pairs();
+                                pending[print] = {{"name", dev_name}, {"ts", static_cast<int64_t>(std::time(nullptr))}};
+                                save_pending_pairs(pending);
                             }
 
                             char hostname[256] = {};
@@ -2090,11 +2279,32 @@ namespace tether {
                         bc["command"] = "clipboard_updated";
                         bc["content"] = content;
                         broadcast_message(bc.dump(), client_fd);
+                    } else if (j.contains("command") && j["command"] == "hello") {
+                        // feature negotiation. old daemons answer "OK"
+                        const auto features = j.value("features", nlohmann::json::array());
+                        if (features.is_array() &&
+                            std::find(features.begin(), features.end(), "clipboard_image") != features.end())
+                            set_session_clipboard_images(client_fd);
+                        nlohmann::json resp{{"command", "hello"}};
+                        resp["features"] = nlohmann::json::array({"clipboard_image"});
+                        std::string payload = resp.dump() + "\n";
+                        robust_ssl_write(ssl, payload.c_str(), payload.size());
+                        continue;
                     } else if (j.contains("command") && j["command"] == "open_url" && j.contains("content") &&
                                j["content"].is_string()) {
                         open_web_url(j["content"].get<std::string>());
                     } else if (j.contains("command") && j["command"] == "clipboard_get") {
                         if (g_wayland) {
+                            std::vector<std::string> image;
+                            if (session_accepts_clipboard_images(client_fd))
+                                image = clipboard_image_messages(g_wayland->get_clipboard_image(), "content");
+                            if (!image.empty()) {
+                                for (auto& m : image) {
+                                    m += "\n";
+                                    robust_ssl_write(ssl, m.c_str(), m.size());
+                                }
+                                continue;
+                            }
                             nlohmann::json resp;
                             resp["command"] = "clipboard_content";
                             resp["content"] = g_wayland->get_clipboard();
@@ -2109,12 +2319,25 @@ namespace tether {
                         robust_ssl_write(ssl, payload.c_str(), payload.size());
                         continue;
                     } else if (j.contains("command") && j["command"] == "file_start") {
-                        if (g_file_manager)
+                        // A clipboard image goes to the clipboard, not Downloads.
+                        if (j.contains("clipboard"))
+                            clipboard_images_[client_fd].start(j["transfer_id"], j["size"]);
+                        else if (g_file_manager)
                             g_file_manager->handle_start(j["transfer_id"], j["filename"], j["size"]);
                     } else if (j.contains("command") && j["command"] == "file_chunk") {
-                        if (g_file_manager)
+                        if (!clipboard_images_[client_fd].chunk(j["transfer_id"], j["data"]) && g_file_manager)
                             g_file_manager->handle_chunk(j["transfer_id"], j["chunk_index"], j["data"]);
                     } else if (j.contains("command") && j["command"] == "file_end") {
+                        if (std::string png = clipboard_images_[client_fd].finish(j["transfer_id"]); !png.empty()) {
+                            if (g_wayland)
+                                g_wayland->copy_image_to_clipboard(png);
+                            broadcast_clipboard_image(png, client_fd);
+                            nlohmann::json resp{{"command", "file_status"}, {"status", "success"}};
+                            resp["transfer_id"] = j["transfer_id"];
+                            std::string payload = resp.dump() + "\n";
+                            robust_ssl_write(ssl, payload.c_str(), payload.size());
+                            continue;
+                        }
                         if (g_file_manager && g_file_manager->handle_end(j["transfer_id"])) {
                             nlohmann::json resp;
                             resp["command"] = "file_status";
@@ -2219,8 +2442,8 @@ namespace tether {
         std::string device_name = lookup_known_host_name(fingerprint);
         if (device_name.empty())
             device_name = fallback_name.empty() ? "Paired Device" : fallback_name;
-        if (pending.contains(fingerprint) && pending[fingerprint].is_string()) {
-            device_name = pending[fingerprint].get<std::string>();
+        if (const std::string pending_name = pending_pair_name(pending, fingerprint); !pending_name.empty()) {
+            device_name = pending_name;
             pending.erase(fingerprint);
             save_pending_pairs(pending);
         }
@@ -2286,9 +2509,11 @@ namespace tether {
         // A headless client approves through the command socket. No GUI is not a rejection.
         // WAYLAND_DISPLAY alone would also skip a working X11 session: tether-dialog
         // falls back to an ordinary window when gtk-layer-shell isn't available.
+        // A daemon started before the compositor finds it later, without WAYLAND_DISPLAY.
+        const std::string live_display = g_wayland ? g_wayland->display_name() : std::string{};
         const char* wayland_display = std::getenv("WAYLAND_DISPLAY");
         const char* x11_display = std::getenv("DISPLAY");
-        if ((!wayland_display || !*wayland_display) && (!x11_display || !*x11_display))
+        if (live_display.empty() && (!wayland_display || !*wayland_display) && (!x11_display || !*x11_display))
             return;
 
         // Translated before the fork: gettext takes a lock, and calling it in the
@@ -2302,6 +2527,29 @@ namespace tether {
         const std::string title = _("Pairing Request");
         const std::string accept = _("Accept");
         const std::string reject = _("Reject");
+
+        // build before the fork, child of a thread must not allocate
+        const std::string live_env = "WAYLAND_DISPLAY=" + live_display;
+        std::vector<char*> envp;
+        for (char** e = environ; *e; ++e) {
+            if (live_display.empty() || std::strncmp(*e, "WAYLAND_DISPLAY=", 16) != 0)
+                envp.push_back(*e);
+        }
+        if (!live_display.empty())
+            envp.push_back(const_cast<char*>(live_env.c_str()));
+        envp.push_back(nullptr);
+        const char* const argv[] = {"tether-dialog",
+                                    "--title",
+                                    title.c_str(),
+                                    "--body",
+                                    body.c_str(),
+                                    "--accept",
+                                    accept.c_str(),
+                                    "--reject",
+                                    reject.c_str(),
+                                    "--timeout",
+                                    "60",
+                                    nullptr};
 
         // Create a pipe so the parent can detect when the child exits via epoll
         int pipefd[2];
@@ -2332,33 +2580,9 @@ namespace tether {
             }
             std::string sibling = (self_path.parent_path() / "tether-dialog").string();
 
-            execl(sibling.c_str(),
-                  "tether-dialog",
-                  "--title",
-                  title.c_str(),
-                  "--body",
-                  body.c_str(),
-                  "--accept",
-                  accept.c_str(),
-                  "--reject",
-                  reject.c_str(),
-                  "--timeout",
-                  "60",
-                  nullptr);
+            execve(sibling.c_str(), const_cast<char* const*>(argv), envp.data());
             // If sibling path failed, try PATH
-            execlp("tether-dialog",
-                   "tether-dialog",
-                   "--title",
-                   title.c_str(),
-                   "--body",
-                   body.c_str(),
-                   "--accept",
-                   accept.c_str(),
-                   "--reject",
-                   reject.c_str(),
-                   "--timeout",
-                   "60",
-                   nullptr);
+            execvpe("tether-dialog", const_cast<char* const*>(argv), envp.data());
             // exec failed entirely
             debug::log(ERR, "spawn_pair_dialog: exec failed: {}", std::strerror(errno));
             _exit(3);
@@ -2405,6 +2629,7 @@ namespace tether {
                            exit_code);
             } else {
                 debug::log(INFO, "[Pairing Rejected] {} (exit code {})", info.device_name, exit_code);
+                erase_pending_pair(info.fingerprint);
 
                 auto remote_it = connected_remote_clients.find(info.client_fd);
                 auto ssl_it = active_ssl_.find(info.client_fd);

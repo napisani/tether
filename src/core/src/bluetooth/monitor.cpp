@@ -10,8 +10,6 @@
 #include <csignal>
 #include <cstdlib>
 #include <fcntl.h>
-#include <filesystem>
-#include <fstream>
 #include <gio/gio.h>
 #include <map>
 #include <mutex>
@@ -52,6 +50,7 @@ namespace tether::bluetooth {
         BluezObjects objects;
         Capability cap;
         std::map<std::string, std::string> disconnect_reasons;
+        std::map<std::string, uint64_t> le_drops;
         std::string preferred_adapter_id;
         std::string secure_adapter;
         std::optional<bool> secure_connections;
@@ -131,6 +130,9 @@ namespace tether::bluetooth {
             {
                 std::lock_guard<std::mutex> lock(impl->mutex);
                 impl->disconnect_reasons[object_path] = reason;
+                if (g_strcmp0(interface_name, "org.bluez.Bearer.LE1") == 0 ||
+                    g_strcmp0(interface_name, "org.bluez.Device1") == 0)
+                    ++impl->le_drops[object_path];
             }
             debug::log(INFO,
                        "bluetooth: {} disconnected from {}: {} ({})",
@@ -168,30 +170,6 @@ namespace tether::bluetooth {
         g_source_unref(source);
     }
 
-    // bluetoothd exposes no property for its own flags, so the argument vector is
-    // the only place to read it. Accepts both spellings; Arch's unit uses -E.
-    static bool scan_bluetoothd_cmdline() {
-        std::error_code ec;
-        for (const auto& entry : std::filesystem::directory_iterator("/proc", ec)) {
-            std::ifstream comm(entry.path() / "comm");
-            std::string name;
-            if (!comm || !std::getline(comm, name) || name != "bluetoothd")
-                continue;
-
-            std::ifstream cmdline(entry.path() / "cmdline", std::ios::binary);
-            if (!cmdline)
-                continue;
-            // Arguments are NUL-separated, so each one compares exactly.
-            std::string arg;
-            while (std::getline(cmdline, arg, '\0')) {
-                if (arg == "-E" || arg == "--experimental")
-                    return true;
-            }
-            return false;
-        }
-        return false;
-    }
-
     namespace {
         std::optional<bool> environment_flag(const char* name) {
             const char* raw = std::getenv(name);
@@ -209,32 +187,11 @@ namespace tether::bluetooth {
         }
     } // namespace
 
-    // Walking /proc costs about 2ms and refresh() runs on every debounced BlueZ
-    // signal, so the discovered answer is cached. A container orchestrator can
-    // provide the host's answer because host processes are absent from its PID
-    // namespace even when the host system bus is mounted in.
-    bool bluetoothd_has_experimental() {
-        if (const auto configured = environment_flag("TETHER_BLUEZ_EXPERIMENTAL"))
-            return *configured;
-
-        static constexpr auto kRecheckAfter = std::chrono::seconds(3);
-        static std::chrono::steady_clock::time_point checked_at{};
-        static bool value = false;
-
-        const auto now = std::chrono::steady_clock::now();
-        if (checked_at == std::chrono::steady_clock::time_point{} || now - checked_at >= kRecheckAfter) {
-            value = scan_bluetoothd_cmdline();
-            checked_at = now;
-        }
-        return value;
-    }
-
     std::optional<bool> probe_secure_connections(const std::string& adapter_id, std::chrono::milliseconds timeout) {
         if (adapter_id.empty())
             return std::nullopt;
-        if (const auto configured = environment_flag("TETHER_BLUEZ_SECURE_CONNECTIONS"))
-            return configured;
 
+        const auto configured = [] { return environment_flag("TETHER_BLUEZ_SECURE_CONNECTIONS"); };
         std::array<gchar*, 5> argv = {
             const_cast<gchar*>("btmgmt"),
             const_cast<gchar*>("--index"),
@@ -266,7 +223,7 @@ namespace tether::bluetooth {
                        adapter_id,
                        error ? error->message : "unknown error");
             g_clear_error(&error);
-            return std::nullopt;
+            return configured();
         }
         if (input_fd >= 0)
             close(input_fd);
@@ -337,18 +294,18 @@ namespace tether::bluetooth {
             debug::log(WARN, "bluetooth: btmgmt info for {} timed out after {}ms", adapter_id, elapsed.count());
             close(output_fd);
             g_spawn_close_pid(child);
-            return std::nullopt;
+            return configured();
         }
 
         drain_output();
         close(output_fd);
         g_spawn_close_pid(child);
         if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
-            return std::nullopt;
+            return configured();
 
         const size_t settings = output.find("current settings:");
         if (settings == std::string::npos)
-            return std::nullopt;
+            return configured();
         const size_t line_end = output.find('\n', settings);
         const std::string line = output.substr(settings, line_end - settings);
         return line.find("secure-conn") != std::string::npos;
@@ -394,7 +351,6 @@ namespace tether::bluetooth {
 
         BluezObjects parsed = parse_managed_objects(reply);
         g_variant_unref(reply);
-        parsed.experimental_api = bluetoothd_has_experimental();
         std::string preferred;
         {
             std::lock_guard<std::mutex> lock(mutex);
@@ -502,7 +458,6 @@ namespace tether::bluetooth {
             return false;
         }
         impl_->objects = parse_managed_objects(probe);
-        impl_->objects.experimental_api = bluetoothd_has_experimental();
         // Secure Connections stays unknown until the watcher thread's first
         // refresh: probing it here would fork btmgmt on the startup path.
         impl_->cap = resolve_capability(impl_->objects);
@@ -612,6 +567,12 @@ namespace tether::bluetooth {
             return it == impl_->disconnect_reasons.end() ? std::string{} : it->second;
         }
         return {};
+    }
+
+    uint64_t BluezMonitor::le_drop_count(const std::string& device_path) const {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        auto it = impl_->le_drops.find(device_path);
+        return it == impl_->le_drops.end() ? 0 : it->second;
     }
 
     void BluezMonitor::clear_disconnect_reason(const std::string& address) {

@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <sys/types.h>
+#include <vector>
 
 namespace tether {
 
@@ -31,12 +32,46 @@ namespace tether {
     void unregister_local_subscriber(int fd);
     void broadcast_local_event(const std::string& msg, int exclude_fd = -1);
 
+    // The mDNS peers the daemon currently knows of.
+    void set_discovered_devices(const nlohmann::json& devices);
+
+    // Normalizes stored pairing requests to {fingerprint: {name, ts}} and drops
+    // the ones older than the TTL.
+    nlohmann::json prune_pending_pairs(const nlohmann::json& raw, int64_t now);
+
     // Store an OTP and push it to local subscribers (browser extension, GTK).
     // sender_domain is the registrable domain of the email sender, "" when the
     // code did not come from email.
     void otp_publish(const std::string& code, const std::string& sender_domain = "", int exclude_fd = -1);
     void record_received_file(const std::filesystem::path& path, size_t bytes_written);
     size_t broadcast_tcp_message(const std::string& msg, int exclude_fd = -1);
+
+    inline constexpr size_t CLIPBOARD_IMAGE_MAX_BYTES = 32u * 1024 * 1024;
+
+    // A clipboard PNG as file_start/file_chunk/file_end messages tagged with
+    // "clipboard": kind ("updated" or "content"). Empty when the image is too large.
+    std::vector<std::string> clipboard_image_messages(const std::string& png, const std::string& kind);
+
+    // Sends a clipboard PNG as "updated" to every session that announced
+    // clipboard_image in its hello. Older clients would save it as a file.
+    void broadcast_clipboard_image(const std::string& png, int exclude_fd = -1);
+    bool session_accepts_clipboard_images(int fd);
+
+    // Reassembles one clipboard image a peer sends as a file transfer.
+    // A new start replaces any transfer in progress.
+    class ClipboardImageReceiver {
+    public:
+        bool start(const std::string& transfer_id, size_t size);
+        // False when the chunk is not part of this transfer.
+        bool chunk(const std::string& transfer_id, const std::string& b64_data);
+        // The PNG once every byte arrived, else empty.
+        std::string finish(const std::string& transfer_id);
+
+    private:
+        std::string id_;
+        size_t expected_ = 0;
+        std::string data_;
+    };
 
     // Versioned control-protocol features. Clients use this to hide unsupported
     // controls instead of guessing from the daemon version.
@@ -58,6 +93,10 @@ namespace tether {
     // mirrored iPhone alerts, incoming messages, and arriving files.
     void set_desktop_popups_enabled(bool enabled);
     bool desktop_popups_enabled();
+
+    // Whether phone popups include the message text. Off keeps only the sender.
+    void set_popup_previews_enabled(bool enabled);
+    bool popup_previews_enabled();
 
     void set_mdns_available(bool available);
     bool mdns_available();
@@ -139,6 +178,7 @@ namespace tether {
         int server_fd_ = -1;
         int bind_port_;
         std::map<int, std::string> client_buffers_;
+        std::map<int, ClipboardImageReceiver> clipboard_images_;
         std::map<int, SSL*> active_ssl_;
         std::map<int, bool> ssl_handshake_complete_;
         std::map<int, bool> client_paired_;

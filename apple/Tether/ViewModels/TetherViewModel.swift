@@ -36,6 +36,7 @@ struct ClipboardEntry: Identifiable {
     let content: String
     let timestamp: Date
     let source: ClipboardSource
+    var image: Data? = nil // PNG bytes when the entry is an image
 
     enum ClipboardSource: Equatable {
         case local(String)
@@ -95,6 +96,10 @@ final class TetherViewModel {
 
     // Name of the connected device, if any.
     private(set) var connectedDeviceName: String?
+
+    // Whether the daemon answered hello with clipboard_image. Older daemons
+    // would save a sent image to Downloads instead of the clipboard.
+    private(set) var daemonSupportsClipboardImages = false
 
     // Clipboard history (most recent first).
     private(set) var clipboardHistory: [ClipboardEntry] = []
@@ -156,6 +161,7 @@ final class TetherViewModel {
     private struct IncomingTransferBuffer {
         let filename: String
         let expectedSize: Int64
+        var clipboard: String? = nil
         var data = Data()
     }
 
@@ -208,6 +214,7 @@ final class TetherViewModel {
         case .active:
             manualDisconnect = false
             reconnectAttempts = 0
+            startServer()
             refreshDiscovery()
         case .background:
             pendingReconnectTask?.cancel()
@@ -281,7 +288,17 @@ final class TetherViewModel {
     // Send the current iOS clipboard content to the daemon.
     func sendClipboard() {
         #if canImport(UIKit)
-        guard let text = UIPasteboard.general.string, !text.isEmpty else {
+        let pasteboard = UIPasteboard.general
+        // Text wins when both are present, matching the daemon.
+        if !pasteboard.hasStrings, pasteboard.hasImages {
+            guard let png = pasteboard.data(forPasteboardType: UTType.png.identifier) ?? pasteboard.image?.pngData() else {
+                errorMessage = "Clipboard is empty."
+                return
+            }
+            sendClipboardImage(png)
+            return
+        }
+        guard let text = pasteboard.string, !text.isEmpty else {
             errorMessage = "Clipboard is empty."
             return
         }
@@ -299,6 +316,27 @@ final class TetherViewModel {
         clipboardHistory.insert(entry, at: 0)
 
         // Keep the history manageable
+        if clipboardHistory.count > 50 {
+            clipboardHistory = Array(clipboardHistory.prefix(50))
+        }
+    }
+
+    // Send PNG bytes to the daemon's clipboard as a file transfer tagged "set".
+    private func sendClipboardImage(_ png: Data) {
+        guard daemonSupportsClipboardImages else {
+            errorMessage = "Update Tether on your computer to send images."
+            return
+        }
+        // Same cap the daemon enforces.
+        guard png.count <= 32 * 1024 * 1024 else {
+            errorMessage = "Image is too large to send (32 MB max)."
+            return
+        }
+        sendFile(data: png, filename: "clipboard.png", clipboard: "set")
+
+        let size = ByteCountFormatter.string(fromByteCount: Int64(png.count), countStyle: .file)
+        let entry = ClipboardEntry(content: "Image, \(size)", timestamp: Date(), source: .local(certificateManager.localDeviceName), image: png)
+        clipboardHistory.insert(entry, at: 0)
         if clipboardHistory.count > 50 {
             clipboardHistory = Array(clipboardHistory.prefix(50))
         }
@@ -325,6 +363,11 @@ final class TetherViewModel {
         #endif
     }
 
+    // Copy PNG bytes to the iOS pasteboard.
+    func copyImageToLocalClipboard(_ png: Data) {
+        UIPasteboard.general.setData(png, forPasteboardType: UTType.png.identifier)
+    }
+
     // MARK: - File Transfer
 
     // Send a file to the daemon using its URL.
@@ -347,8 +390,8 @@ final class TetherViewModel {
         }
     }
 
-    // Send raw data to the daemon.
-    func sendFile(data fileData: Data, filename: String) {
+    // Send raw data to the daemon. A clipboard transfer stays out of the Files tab.
+    func sendFile(data fileData: Data, filename: String, clipboard: String? = nil) {
         let transferId = UUID().uuidString
         let totalSize = Int64(fileData.count)
 
@@ -356,14 +399,16 @@ final class TetherViewModel {
             guard let self else { return }
 
             do {
-                await MainActor.run {
-                    let transfer = FileTransfer(
-                        id: transferId,
-                        filename: filename,
-                        totalSize: totalSize,
-                        direction: .outgoing
-                    )
-                    self.activeTransfers.append(transfer)
+                if clipboard == nil {
+                    await MainActor.run {
+                        let transfer = FileTransfer(
+                            id: transferId,
+                            filename: filename,
+                            totalSize: totalSize,
+                            direction: .outgoing
+                        )
+                        self.activeTransfers.append(transfer)
+                    }
                 }
 
                 // Send file_start
@@ -371,7 +416,8 @@ final class TetherViewModel {
                     self.connection.send(.fileStart(
                         filename: filename,
                         size: totalSize,
-                        transferId: transferId
+                        transferId: transferId,
+                        clipboard: clipboard
                     ))
                 }
 
@@ -476,10 +522,16 @@ final class TetherViewModel {
         server.onNewConnection = { [weak self] incomingConn, incomingFingerprint in
             guard let self = self else { return }
 
-            // A live or in-flight session is not displaced by a stranger dialling in.
-            guard self.appState == .disconnected || self.appState == .discovering else {
+            guard self.appState != .connected else {
                 incomingConn.cancel()
                 return
+            }
+            if self.appState == .connecting || self.appState == .pairing {
+                self.cancelConnectTimeout()
+                self.pendingReconnectTask?.cancel()
+                self.pendingReconnectTask = nil
+                self.autoConnectingFingerprint = nil
+                self.showPairingSheet = false
             }
 
             // We just received an incoming connection from a peer!
@@ -508,6 +560,7 @@ final class TetherViewModel {
             // Already paired — go straight to connected
             appState = .connected
             connectedDeviceName = certificateManager.knownHosts[serverFP] ?? connectedDeviceName
+            sendHello()
         } else {
             // Need to pair
             pairingIsInbound = isInbound
@@ -680,6 +733,9 @@ final class TetherViewModel {
             // The peer's user approved. This, not our own tap, is what makes us paired.
             finishPairing()
 
+        case .hello:
+            daemonSupportsClipboardImages = message.features?.contains("clipboard_image") ?? false
+
         case .fileStatus:
             if let transferId = message.transferId, message.status == "success" {
                 if let idx = activeTransfers.firstIndex(where: { $0.id == transferId }) {
@@ -696,8 +752,11 @@ final class TetherViewModel {
 
             incomingTransfers[transferId] = IncomingTransferBuffer(
                 filename: filename,
-                expectedSize: size
+                expectedSize: size,
+                clipboard: message.clipboard
             )
+            // Clipboard images land in clipboard history, not the Files tab.
+            if message.clipboard != nil { break }
 
             if let idx = activeTransfers.firstIndex(where: { $0.id == transferId }) {
                 activeTransfers[idx].filename = filename
@@ -773,10 +832,39 @@ final class TetherViewModel {
         showPairingSheet = false
         pairingStatus = ""
         appState = .connected
+        sendHello()
+    }
+
+    // Announce optional features. Sent only once the peer is pinned, since an
+    // unpinned daemon answers anything else with "unauthorized".
+    private func sendHello() {
+        daemonSupportsClipboardImages = false
+        connection.send(.hello(features: ["clipboard_image"]))
     }
 
     private func finalizeIncomingTransfer(transferId: String) {
         guard let buffered = incomingTransfers.removeValue(forKey: transferId) else { return }
+
+        if let kind = buffered.clipboard {
+            guard Int64(buffered.data.count) == buffered.expectedSize, UIImage(data: buffered.data) != nil else {
+                errorMessage = "Received a damaged clipboard image."
+                return
+            }
+            let sourceName = connectedDeviceName ?? "Desktop"
+            let size = ByteCountFormatter.string(fromByteCount: buffered.expectedSize, countStyle: .file)
+            let entry = ClipboardEntry(content: "Image, \(size)", timestamp: Date(), source: .remote(sourceName), image: buffered.data)
+            clipboardHistory.insert(entry, at: 0)
+            if clipboardHistory.count > 50 {
+                clipboardHistory = Array(clipboardHistory.prefix(50))
+            }
+            // "content" answers a manual request, so it always writes, like clipboard_content.
+            if kind == "content" || autoSyncClipboard {
+                Task { @MainActor in
+                    copyImageToLocalClipboard(buffered.data)
+                }
+            }
+            return
+        }
 
         do {
             guard Int64(buffered.data.count) == buffered.expectedSize else {

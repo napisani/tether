@@ -1,12 +1,16 @@
 #include <gtest/gtest.h>
 
+#include <tether/bluetooth/config.hpp>
+#include <tether/bluetooth/monitor.hpp>
 #include <tether/client.hpp>
 #include <tether/crypto.hpp>
 #include <tether/event_loop.hpp>
 #include <tether/log.hpp>
 #include <tether/net.hpp>
+#include <tether/wayland.hpp>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <arpa/inet.h>
 #include <cerrno>
 #include <chrono>
@@ -407,25 +411,154 @@ namespace {
         EXPECT_EQ(result.value("operation_id", ""), "web-unpair-1");
     }
 
+    TEST(UnixServerTest, FileSendCompletionEchoesOptionalOperationId) {
+        const std::string runtime_dir = unique_test_dir("tether_unix_file_send_test");
+        CleanupGuard cleanup_guard(runtime_dir);
+        std::filesystem::remove_all(runtime_dir);
+        std::filesystem::create_directories(runtime_dir);
+        ScopedEnvVar xdg_runtime_dir("XDG_RUNTIME_DIR", runtime_dir);
+
+        tether::EpollEventLoop loop;
+        tether::TcpServer tcp_server(loop, 0);
+        tether::UnixServer unix_server(loop, tcp_server);
+        ASSERT_TRUE(unix_server.start());
+        EventLoopGuard loop_guard(loop);
+
+        const int client = socket(AF_UNIX, SOCK_STREAM, 0);
+        ASSERT_GE(client, 0);
+        timeval timeout{2, 0};
+        ASSERT_EQ(setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)), 0);
+        sockaddr_un address{};
+        address.sun_family = AF_UNIX;
+        std::snprintf(
+            address.sun_path, sizeof(address.sun_path), "%s", (tether::get_runtime_dir() + "/tetherd.sock").c_str());
+        ASSERT_EQ(connect(client, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+
+        const std::string subscribe = "{\"command\":\"subscribe\"}\n";
+        ASSERT_EQ(write(client, subscribe.data(), subscribe.size()), static_cast<ssize_t>(subscribe.size()));
+        ASSERT_FALSE(read_socket_line(client).empty());
+
+        for (const std::string operation_id : {"web-file-1", ""}) {
+            nlohmann::json send = {{"command", "send_file"}, {"path", runtime_dir + "/missing.txt"}};
+            if (!operation_id.empty())
+                send["operation_id"] = operation_id;
+            const std::string payload = send.dump() + "\n";
+            ASSERT_EQ(write(client, payload.data(), payload.size()), static_cast<ssize_t>(payload.size()));
+
+            nlohmann::json result;
+            for (int attempt = 0; attempt < 8; ++attempt) {
+                const std::string line = read_socket_line(client);
+                if (line.empty())
+                    break;
+                try {
+                    auto candidate = nlohmann::json::parse(line);
+                    if (candidate.value("command", "") == "file_send_complete") {
+                        result = std::move(candidate);
+                        break;
+                    }
+                } catch (...) {
+                }
+            }
+            ASSERT_FALSE(result.is_null());
+            EXPECT_FALSE(result.value("success", true));
+            if (operation_id.empty())
+                EXPECT_FALSE(result.contains("operation_id"));
+            else
+                EXPECT_EQ(result.value("operation_id", ""), operation_id);
+        }
+
+        // The subscribed socket stays open, but an oversized runtime path makes
+        // the worker's internal Client::connect fail without spawning a daemon.
+        {
+            ScopedEnvVar unconnectable_runtime("XDG_RUNTIME_DIR", runtime_dir + "/" + std::string(110, 'x'));
+            const std::string payload = nlohmann::json{{"command", "send_file"},
+                                                       {"path", runtime_dir + "/missing.txt"},
+                                                       {"operation_id", "web-connect-failure"}}
+                                            .dump() +
+                                        "\n";
+            ASSERT_EQ(write(client, payload.data(), payload.size()), static_cast<ssize_t>(payload.size()));
+            const std::string line = read_socket_line(client);
+            ASSERT_FALSE(line.empty()) << "internal connect failure must produce a terminal event";
+            const auto result = nlohmann::json::parse(line);
+            EXPECT_EQ(result.value("command", ""), "file_send_complete");
+            EXPECT_FALSE(result.value("success", true));
+            EXPECT_FALSE(result.value("message", "").empty());
+            EXPECT_EQ(result.value("operation_id", ""), "web-connect-failure");
+        }
+        close(client);
+    }
+
+    TEST(UnixServerTest, MessageSendResultEchoesOptionalOperationId) {
+        const std::string runtime_dir = unique_test_dir("tether_unix_message_send_test");
+        CleanupGuard cleanup_guard(runtime_dir);
+        std::filesystem::remove_all(runtime_dir);
+        std::filesystem::create_directories(runtime_dir);
+        ScopedEnvVar xdg_runtime_dir("XDG_RUNTIME_DIR", runtime_dir);
+
+        tether::EpollEventLoop loop;
+        tether::TcpServer tcp_server(loop, 0);
+        tether::UnixServer unix_server(loop, tcp_server);
+        ASSERT_TRUE(unix_server.start());
+        EventLoopGuard loop_guard(loop);
+
+        const int client = socket(AF_UNIX, SOCK_STREAM, 0);
+        ASSERT_GE(client, 0);
+        timeval timeout{2, 0};
+        ASSERT_EQ(setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)), 0);
+        sockaddr_un address{};
+        address.sun_family = AF_UNIX;
+        std::snprintf(
+            address.sun_path, sizeof(address.sun_path), "%s", (tether::get_runtime_dir() + "/tetherd.sock").c_str());
+        ASSERT_EQ(connect(client, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+
+        const std::string subscribe = "{\"command\":\"subscribe\"}\n";
+        ASSERT_EQ(write(client, subscribe.data(), subscribe.size()), static_cast<ssize_t>(subscribe.size()));
+        ASSERT_FALSE(read_socket_line(client).empty());
+
+        for (const std::string operation_id : {"web-message-1", ""}) {
+            nlohmann::json send = {{"command", "bt_send_message"}, {"thread", "invalid"}, {"body", "test"}};
+            if (!operation_id.empty())
+                send["operation_id"] = operation_id;
+            const std::string payload = send.dump() + "\n";
+            ASSERT_EQ(write(client, payload.data(), payload.size()), static_cast<ssize_t>(payload.size()));
+
+            nlohmann::json result;
+            for (int attempt = 0; attempt < 8; ++attempt) {
+                const std::string line = read_socket_line(client);
+                if (line.empty())
+                    break;
+                try {
+                    auto candidate = nlohmann::json::parse(line);
+                    if (candidate.value("command", "") == "bt_send_result") {
+                        result = std::move(candidate);
+                        break;
+                    }
+                } catch (...) {
+                }
+            }
+            ASSERT_FALSE(result.is_null());
+            EXPECT_FALSE(result.value("success", true));
+            EXPECT_EQ(result.value("thread", ""), "invalid");
+            if (operation_id.empty())
+                EXPECT_FALSE(result.contains("operation_id"));
+            else
+                EXPECT_EQ(result.value("operation_id", ""), operation_id);
+        }
+        close(client);
+    }
+
     TEST(ControlProtocolTest, AdvertisesVersionedCapabilities) {
         const auto info = tether::build_protocol_info();
-
-        EXPECT_EQ(info.at("command"), "protocol_info");
-        EXPECT_EQ(info.at("version"), 1);
-        EXPECT_EQ(info.at("capabilities"),
-                  nlohmann::json::array({"airpods",
-                                         "bluetooth.connection",
-                                         "bluetooth.diagnostics",
-                                         "bluetooth.pairing",
-                                         "calls",
-                                         "clipboard",
-                                         "contacts",
-                                         "files",
-                                         "messages",
-                                         "notifications",
-                                         "otp",
-                                         "peers",
-                                         "settings"}));
+        EXPECT_EQ(info.value("command", ""), "protocol_info");
+        EXPECT_EQ(info.value("version", 0), 1);
+        const auto& capabilities = info.at("capabilities");
+        EXPECT_NE(std::find(capabilities.begin(), capabilities.end(), "files"), capabilities.end());
+        EXPECT_EQ(std::find(capabilities.begin(), capabilities.end(), "files.upload"), capabilities.end());
+        EXPECT_EQ(std::find(capabilities.begin(), capabilities.end(), "calls") != capabilities.end(),
+                  tether::bluetooth::load_config().calls_enabled && tether::bluetooth::g_bluez &&
+                      tether::bluetooth::g_bluez->running());
+        EXPECT_EQ(std::find(capabilities.begin(), capabilities.end(), "clipboard") != capabilities.end(),
+                  tether::g_wayland && tether::g_wayland->clipboard_available());
     }
 
     TEST(ClientTest, ConnectsToAnIpv6Literal) {
@@ -666,6 +799,144 @@ namespace {
         EXPECT_FALSE(parsed.value("device_name", "").empty());
     }
 
+    // What a bare TLS peer saw after the dialler reached it.
+    struct DialOutcome {
+        bool started = false; // the dialler got its listening port
+        bool handshake = false;
+        std::string received; // first line the dialler sent, empty if it closed instead
+        bool pinned = false;  // whether the dialler ended up trusting the peer's cert
+    };
+
+    // Dials a bare TLS peer on loopback, telling the dialler to expect expected_fingerprint.
+    // The peer presents this process's own certificate. With answer_accepted it sends
+    // pair_accepted unprompted straight after the handshake, as a hostile peer would.
+    DialOutcome dial_bare_peer(int dialler_port, const std::string& expected_fingerprint, bool answer_accepted) {
+        DialOutcome outcome;
+        // The daemon ignores SIGPIPE; the peer may write into a connection the dialler dropped.
+        struct SigpipeIgnored {
+            void (*previous)(int) = std::signal(SIGPIPE, SIG_IGN);
+            ~SigpipeIgnored() { std::signal(SIGPIPE, previous); }
+        } sigpipe_ignored;
+
+        const int peer_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (peer_fd < 0)
+            return outcome;
+        int reuse = 1;
+        setsockopt(peer_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+        sockaddr_in peer_addr{};
+        peer_addr.sin_family = AF_INET;
+        peer_addr.sin_port = 0;
+        peer_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t addrlen = sizeof(peer_addr);
+        if (bind(peer_fd, reinterpret_cast<sockaddr*>(&peer_addr), sizeof(peer_addr)) != 0 ||
+            listen(peer_fd, 1) != 0 ||
+            getsockname(peer_fd, reinterpret_cast<sockaddr*>(&peer_addr), &addrlen) != 0) {
+            close(peer_fd);
+            return outcome;
+        }
+        const int peer_port = ntohs(peer_addr.sin_port);
+
+        std::thread peer_thread([peer_fd, answer_accepted, &outcome] {
+            const int conn = accept(peer_fd, nullptr, nullptr);
+            if (conn < 0)
+                return;
+            timeval timeout{5, 0};
+            setsockopt(conn, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+            SSL* ssl = SSL_new(tether::Crypto::instance().get_server_context());
+            SSL_set_fd(ssl, conn);
+            if (SSL_accept(ssl) == 1) {
+                outcome.handshake = true;
+                if (answer_accepted) {
+                    const std::string accepted = "{\"command\":\"pair_accepted\"}\n";
+                    SSL_write(ssl, accepted.data(), static_cast<int>(accepted.size()));
+                }
+                char buf[4096];
+                const int n = SSL_read(ssl, buf, sizeof(buf));
+                if (n > 0)
+                    outcome.received.assign(buf, n);
+            }
+            SSL_free(ssl);
+            close(conn);
+        });
+
+        tether::EpollEventLoop loop;
+        tether::TcpServer dialler(loop, dialler_port);
+        if (!dialler.start()) {
+            shutdown(peer_fd, SHUT_RDWR);
+            close(peer_fd);
+            peer_thread.join();
+            return outcome;
+        }
+
+        outcome.started = true;
+        std::thread loop_thread([&loop] { loop.run(); });
+        dialler.connect_peer("127.0.0.1", peer_port, "peer", expected_fingerprint);
+        peer_thread.join();
+
+        // Give an unprompted pair_accepted time to be acted on before judging.
+        const std::string peer_fingerprint = tether::Crypto::instance().get_my_fingerprint();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        while (!outcome.pinned && std::chrono::steady_clock::now() < deadline) {
+            outcome.pinned = tether::Crypto::instance().is_host_known(peer_fingerprint);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+
+        loop.post([&loop] { loop.stop(); });
+        loop_thread.join();
+        close(peer_fd);
+        return outcome;
+    }
+
+    // mDNS TXT records are unauthenticated, so a reconnect dial made for a trusted
+    // fingerprint can land on anyone advertising it. A different certificate there must
+    // end the connection, never reach pair_request or get pinned.
+    TEST(TcpServerTest, DialForAFingerprintDropsADifferentCertificate) {
+        const std::string home = unique_test_dir("tether_dial_mismatch_test");
+        CleanupGuard cleanup_guard(home);
+        std::filesystem::remove_all(home);
+        std::filesystem::create_directories(home);
+        ScopedEnvVar home_env("HOME", home);
+        ASSERT_TRUE(tether::Crypto::instance().init());
+
+        const std::string trusted_fingerprint(64, 'a');
+        ASSERT_NE(trusted_fingerprint, tether::Crypto::instance().get_my_fingerprint());
+
+        constexpr int dialler_port = 45142;
+        const DialOutcome outcome = dial_bare_peer(dialler_port, trusted_fingerprint, true);
+        if (!outcome.started)
+            GTEST_SKIP() << "port " << dialler_port << " is unavailable";
+        ASSERT_TRUE(outcome.handshake) << "the dial never completed a TLS handshake";
+
+        EXPECT_TRUE(outcome.received.empty()) << "the dialler sent " << outcome.received;
+        EXPECT_FALSE(outcome.pinned) << "the dialler trusted a certificate it did not dial for";
+    }
+
+    // A dial that reaches the certificate it was made for still pairs.
+    TEST(TcpServerTest, DialForAFingerprintProceedsWhenItMatches) {
+        const std::string home = unique_test_dir("tether_dial_match_test");
+        CleanupGuard cleanup_guard(home);
+        std::filesystem::remove_all(home);
+        std::filesystem::create_directories(home);
+        ScopedEnvVar home_env("HOME", home);
+        ASSERT_TRUE(tether::Crypto::instance().init());
+
+        // The certificate outlives HOME within one run, so a cert wrongly pinned by an
+        // earlier test would turn this into a reconnect rather than a pair.
+        ASSERT_FALSE(tether::Crypto::instance().is_host_known(tether::Crypto::instance().get_my_fingerprint()));
+
+        constexpr int dialler_port = 45143;
+        const DialOutcome outcome =
+            dial_bare_peer(dialler_port, tether::Crypto::instance().get_my_fingerprint(), false);
+        if (!outcome.started)
+            GTEST_SKIP() << "port " << dialler_port << " is unavailable";
+        ASSERT_TRUE(outcome.handshake) << "the dial never completed a TLS handshake";
+
+        ASSERT_FALSE(outcome.received.empty()) << "the dialler sent nothing after the handshake";
+        EXPECT_EQ(nlohmann::json::parse(outcome.received).value("command", ""), "pair_request");
+    }
+
 } // namespace
 
 TEST(FirewallTest, UfwEnabledReadsTheEnabledKey) {
@@ -715,4 +986,39 @@ TEST(ShouldDialPeer, SkipsUnknownIncompleteAndSelf) {
     EXPECT_FALSE(tether::should_dial_peer("", "bbb", true));
     EXPECT_FALSE(tether::should_dial_peer("aaa", "", true)); // peer published no fp= TXT record
     EXPECT_FALSE(tether::should_dial_peer("aaa", "aaa", true));
+}
+
+// A pairing request whose peer never came back used to sit in the device list
+// forever, and every run of a test suite added another.
+TEST(PendingPairs, DropsRequestsPastTheTtl) {
+    const int64_t now = 1'700'000'000;
+    nlohmann::json raw;
+    raw["fresh"] = {{"name", "iPhone"}, {"ts", now - 60}};
+    raw["stale"] = {{"name", "test phone"}, {"ts", now - 7200}};
+
+    const auto live = tether::prune_pending_pairs(raw, now);
+    EXPECT_TRUE(live.contains("fresh"));
+    EXPECT_FALSE(live.contains("stale"));
+    EXPECT_EQ(live["fresh"]["name"], "iPhone");
+}
+
+TEST(PendingPairs, AgesTheLegacyBareNameFormatFromNow) {
+    const int64_t now = 1'700'000'000;
+    nlohmann::json raw;
+    raw["old"] = "iPhone";
+
+    const auto live = tether::prune_pending_pairs(raw, now);
+    ASSERT_TRUE(live.contains("old"));
+    EXPECT_EQ(live["old"]["name"], "iPhone");
+    EXPECT_EQ(live["old"]["ts"], now);
+    // Migrated, not immortal.
+    EXPECT_TRUE(tether::prune_pending_pairs(live, now + 7200).empty());
+}
+
+TEST(PendingPairs, IgnoresJunkEntries) {
+    nlohmann::json raw;
+    raw["no_name"] = {{"ts", 1}};
+    raw["wrong_type"] = 42;
+    EXPECT_TRUE(tether::prune_pending_pairs(raw, 1'700'000'000).empty());
+    EXPECT_TRUE(tether::prune_pending_pairs(nlohmann::json::array(), 1).empty());
 }

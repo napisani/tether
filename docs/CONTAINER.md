@@ -40,11 +40,10 @@ needs a Wayland session and is not available here.
    interface on 5135/tcp, and mDNS 5353/udp only on the trusted local network;
    see the README's firewall instructions. Prefer an HTTPS reverse proxy or
    Kubernetes ingress in front of port 5135.
-3. Verify the host settings, then set `TETHER_BLUEZ_EXPERIMENTAL=1` and
-   `TETHER_BLUEZ_SECURE_CONNECTIONS=1` in the container environment. A container
-   can use BlueZ over D-Bus but cannot inspect the host daemon's PID namespace or
-   run host management tools, so these declarations make diagnostics reflect the
-   configuration you verified.
+3. Verify the host settings, then set `TETHER_BLUEZ_SECURE_CONNECTIONS=1` in
+   the container environment. Tether can detect BlueZ's experimental API over
+   D-Bus, but the container cannot run host management tools to inspect the
+   controller's Secure Connections setting.
 4. Choose a real non-root host UID/GID authorized to use the host system bus and
    Bluetooth services. Do not run another `tetherd` on that host port/adapter.
 
@@ -80,8 +79,8 @@ Edit `packaging/container/.env`:
   paths. Replace the example `/home/your-user` values; do not use literal `$HOME`.
 - Optionally choose `TETHER_HOSTNAME`, a DNS-style host label such as `tether-pi`.
   It is the advertised display name; the persisted certificate is the identity.
-- Leave the two BlueZ capability declarations at `1` only after checking that the
-  host meets both prerequisites. Set either to `0` when that capability is absent.
+- Leave `TETHER_BLUEZ_SECURE_CONNECTIONS=1` only after checking that the host
+  controller meets that prerequisite. Set it to `0` when the capability is absent.
 - Set `TETHER_WEB_ALLOWED_HOSTS` to the comma-separated hostnames used in browser
   URLs, for example `tether.home.example,localhost`. Requests carrying any other
   `Host` header are rejected.
@@ -245,16 +244,15 @@ These environment switches are also usable outside Docker:
 |---|---|---|
 | `TETHER_LOG_STDERR` | `1` | Keep daemon stderr attached to its supervisor |
 | `TETHER_NO_AUTOSTART` | `1` | Prevent CLI/client helpers from spawning `tetherd` |
-| `TETHER_BLUEZ_EXPERIMENTAL` | Boolean (`1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off`) | Declare whether the host started `bluetoothd` with experimental APIs |
-| `TETHER_BLUEZ_SECURE_CONNECTIONS` | Boolean, as above | Declare whether the host controller has Secure Connections enabled |
+| `TETHER_BLUEZ_SECURE_CONNECTIONS` | Boolean (`1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off`) | Declare whether the host controller has Secure Connections enabled |
 | `TETHER_WEB_ENABLED` | `1` or `0` | Start or omit the supervised browser gateway; defaults to `1` in the image |
 | `TETHER_WEB_LISTEN` | Address such as `0.0.0.0:5135` | Browser gateway listen address |
 | `TETHER_WEB_ALLOWED_HOSTS` | Comma-separated hostnames | Required for wildcard listening; rejects unexpected Host headers |
 | `TETHER_SOCKET_PATH` | Unix-socket path | Override the gateway-to-daemon socket only for nonstandard packaging/testing |
 
-Unset runtime switches preserve normal behavior. Unset capability declarations
-fall back to local `/proc` and `btmgmt` probes, which are suitable outside a
-container but cannot reliably inspect a container's host.
+Unset runtime switches preserve normal behavior. The local `btmgmt` result takes
+precedence when available; the capability declaration is used only when that probe
+cannot inspect the host controller from inside a container.
 
 `XDG_DOWNLOAD_DIR` now takes precedence when nonempty and absolute; invalid or
 empty overrides fall back to the existing GLib/HOME lookup.
@@ -270,9 +268,11 @@ Troubleshooting:
   reason to enable privileged mode silently.
 - **Phone not discoverable:** confirm Avahi, host firewall and local multicast
   connectivity. This container cannot make mDNS cross an isolated network/VPN.
-- **Misleading `tether bt setup` advice:** verify the host capabilities and pass
-  the two matching `TETHER_BLUEZ_*` declarations. Do not share host PID space or
-  add Bluetooth management capabilities just to improve a diagnostic.
+- **Misleading `tether bt setup` advice:** the experimental-API check reads
+  BlueZ's own objects now, so the container's PID namespace no longer hides the
+  answer. Set `TETHER_BLUEZ_SECURE_CONNECTIONS` if the `btmgmt` probe lacks
+  permission; don't share host PID space or add management capabilities just to
+  improve a diagnostic.
 - **Host service repaired/restarted:** Tether may need a container restart if
   BlueZ was unavailable during startup. This packaging does not promise new
   D-Bus reconnection behavior.
