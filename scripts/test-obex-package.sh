@@ -15,5 +15,8 @@ sha256sum "$binary"
 if [[ -L /usr/local/libexec/tether-obexd ]]; then
     [[ $(readlink -f /usr/local/libexec/tether-obexd) == "$binary" ]]
     test ! -e /usr/share/dbus-1/services/org.bluez.obex.service
+    [[ $(stat -c '%u:%a' /run/systemd) == '0:700' ]]
+    test ! -r /run/systemd
+    printf 'PASS: non-root headless runtime cannot inherit logind seats\n'
 fi
 printf 'PASS: packaged OBEX version and executable provenance\n'
