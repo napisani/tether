@@ -2,18 +2,18 @@ name: Experimental Ubuntu 26.04 container
 
 on:
   push:
-    tags: ['tether-v0.2.37-experimental.ubuntu26.1']
+    tags: ['tether-v0.2.37-experimental.ubuntu26.2']
 
 permissions:
   contents: read
 
 env:
-  VERSION: 0.2.37-experimental.ubuntu26.1
+  VERSION: 0.2.37-experimental.ubuntu26.2
   IMAGE: ghcr.io/napisani/tether-core-experimental
 
 jobs:
   build:
-    if: github.repository == 'napisani/tether' && github.ref == 'refs/tags/tether-v0.2.37-experimental.ubuntu26.1'
+    if: github.repository == 'napisani/tether' && github.ref == 'refs/tags/tether-v0.2.37-experimental.ubuntu26.2'
     strategy:
       fail-fast: false
       matrix:
@@ -94,7 +94,7 @@ jobs:
           retention-days: 14
 
   publish:
-    if: github.repository == 'napisani/tether' && github.ref == 'refs/tags/tether-v0.2.37-experimental.ubuntu26.1'
+    if: github.repository == 'napisani/tether' && github.ref == 'refs/tags/tether-v0.2.37-experimental.ubuntu26.2'
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 20

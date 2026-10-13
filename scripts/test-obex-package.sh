@@ -10,7 +10,8 @@ fi
 binary=$(dpkg -L bluez-obexd | grep '/obexd$')
 test -x "$binary"
 dpkg-query -S "$binary"
-"$binary" --version
+"$binary" --help | grep -F -- '--nodetach'
+sha256sum "$binary"
 if [[ -L /usr/local/libexec/tether-obexd ]]; then
     [[ $(readlink -f /usr/local/libexec/tether-obexd) == "$binary" ]]
     test ! -e /usr/share/dbus-1/services/org.bluez.obex.service
