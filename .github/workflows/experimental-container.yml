@@ -1,0 +1,80 @@
+name: Experimental container
+
+on:
+  push:
+    tags: ['tether-v*-experimental.*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Release identity
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#tether-v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-experimental\.[0-9]+$ ]]
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/tether-core" >> "$GITHUB_ENV"
+      - name: Build tests and runtime
+        shell: bash
+        run: |
+          docker build --progress=plain --platform '${{ matrix.platform }}' \
+            --build-arg TETHER_VERSION="$VERSION" --target test \
+            -f packaging/container/Dockerfile -t tether-tests:release .
+          docker build --progress=plain --platform '${{ matrix.platform }}' \
+            --build-arg TETHER_VERSION="$VERSION" --target runtime \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.version=$VERSION" \
+            -f packaging/container/Dockerfile -t "$IMAGE:$VERSION-${{ matrix.arch }}" .
+      - name: Smoke test
+        shell: bash
+        run: scripts/test-container.sh "$IMAGE:$VERSION-${{ matrix.arch }}" tether-tests:release
+      - name: Publish architecture image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE:$VERSION-${{ matrix.arch }}"
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Publish multi-architecture manifest and prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#tether-v}"
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/tether-core"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx imagetools create --tag "$image:$version" \
+            "$image:$version-amd64" "$image:$version-arm64"
+          docker buildx imagetools inspect "$image:$version"
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --prerelease --latest=false \
+            --title "Tether fork $version" \
+            --notes "Experimental container from $GITHUB_REPOSITORY at $GITHUB_SHA. Includes upstream Tether and the Ubuntu OBEX RX/TX MTU backport. Image: $image:$version. Both native architectures passed container tests and smoke checks. Hardware recovery is not yet verified. Does not update latest or stable image tags."
