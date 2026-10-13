@@ -1,0 +1,18 @@
+From: Frédéric Danis <frederic.danis@collabora.com>
+Subject: [PATCH] obexd: client: Fix connect RX MTU
+Origin: upstream, https://github.com/bluez/bluez/commit/99abc8a9e1e1d256749e519a1758bf9a8576c468
+
+Backport the constructor argument-order fix only. g_obex_new takes RX, TX;
+the transport's getpacketopt callback returns TX, RX.
+
+--- a/obexd/client/session.c
++++ b/obexd/client/session.c
+@@ -371,7 +371,7 @@
+ 	else
+ 		type = G_OBEX_TRANSPORT_STREAM;
+ 
+-	obex = g_obex_new(io, type, tx_mtu, rx_mtu);
++	obex = g_obex_new(io, type, rx_mtu, tx_mtu);
+ 	if (obex == NULL)
+ 		goto done;
+ 

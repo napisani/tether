@@ -15,6 +15,17 @@ COPY --from=web-ui /src/web/cmd/tether-web/dist/ ./cmd/tether-web/dist/
 RUN CGO_ENABLED=0 go test ./... \
     && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /tether-web ./cmd/tether-web
 
+# Ubuntu 5.72 does not include the upstream OBEX RX/TX constructor fix.
+# Keep the distro source patches; build/test only OBEX, not host bluetoothd.
+FROM ubuntu:24.04 AS obex-build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential autoconf automake libtool pkg-config curl ca-certificates patch xz-utils \
+    libglib2.0-dev libdbus-1-dev libical-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY packaging/container/obex/ /obex/
+ARG BUILD_JOBS=4
+RUN bash /obex/build.sh /build-obex /obex-payload
+
 FROM ubuntu:24.04 AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ cmake ninja-build git pkg-config ca-certificates \
@@ -44,14 +55,16 @@ USER 1000:1000
 RUN ctest --output-on-failure -j 4
 
 FROM ubuntu:24.04 AS runtime
+COPY --from=obex-build /obex-payload/ /usr/local/
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash coreutils tini dbus-daemon dbus-bin libglib2.0-bin bluez-obexd \
     libwayland-client0 libavahi-client3 libssl3t64 libglib2.0-0t64 libsecret-1-0 libnotify4 \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /usr/local/libexec /data /downloads /run/tether-runtime \
-    && obexd="$(dpkg -L bluez-obexd | grep '/obexd$')" \
-    && test -x "$obexd" && "$obexd" --help | grep -q -- '--nodetach' \
-    && ln -s "$obexd" /usr/local/libexec/tether-obexd \
+    # Retain bluez-obexd for distro-managed runtime dependencies, but supervise
+    # only the checksum-verified executable built and tested above.
+    && sha256sum --check /usr/local/share/tether/obexd.sha256 \
+    && /usr/local/libexec/tether-obexd --help | grep -q -- '--nodetach' \
     # OBEX is explicitly supervised, never silently respawned by D-Bus activation.
     && rm /usr/share/dbus-1/services/org.bluez.obex.service \
     && chown 1000:1000 /data /downloads /run/tether-runtime \
@@ -60,7 +73,7 @@ COPY --from=build /payload/ /usr/local/
 COPY --from=web-build /tether-web /usr/local/bin/tether-web
 COPY --chmod=755 packaging/container/entrypoint.sh /usr/local/libexec/tether-container-entrypoint
 COPY --chmod=755 packaging/container/healthcheck.sh /usr/local/libexec/tether-container-healthcheck
-RUN ldd /usr/local/bin/tether /usr/local/bin/tetherd > /tmp/linked-libraries \
+RUN ldd /usr/local/bin/tether /usr/local/bin/tetherd /usr/local/libexec/tether-obexd > /tmp/linked-libraries \
     && ! grep -q 'not found' /tmp/linked-libraries && rm /tmp/linked-libraries
 ENV HOME=/data \
     XDG_CONFIG_HOME=/data/.config \
