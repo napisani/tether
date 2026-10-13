@@ -42,6 +42,10 @@ namespace tether::bluetooth {
         // Clears the last disconnect reason for the device, so that the next disconnect will be reported.
         void clear_disconnect_reason(const std::string& address);
 
+        // Disconnected signals seen on the device's LE bearer or the whole device.
+        // Only its change matters. Each one ends any GATT session on the link.
+        uint64_t le_drop_count(const std::string& device_path) const;
+
         // Which controller to use: "hciN" or an address, empty for the first powered one.
         void set_preferred_adapter(std::string id);
         std::string preferred_adapter_id() const;
@@ -58,15 +62,10 @@ namespace tether::bluetooth {
 
     extern BluezMonitor* g_bluez;
 
-    // BlueZ does not expose whether bluetoothd started with experimental APIs.
-    // Reads TETHER_BLUEZ_EXPERIMENTAL when supplied by a container orchestrator,
-    // otherwise inspects the host process command line.
-    bool bluetoothd_has_experimental();
-
     // BlueZ exposes Secure Connections only through the management interface.
-    // Reads TETHER_BLUEZ_SECURE_CONNECTIONS when supplied by a container
-    // orchestrator, otherwise runs btmgmt and returns no value if it fails or
-    // exceeds the deadline. Public so both boundaries can be tested directly.
+    // Runs btmgmt first, then falls back to TETHER_BLUEZ_SECURE_CONNECTIONS when
+    // a container cannot use host management tools. Public so the process
+    // boundary can be tested directly.
     std::optional<bool> probe_secure_connections(const std::string& adapter_id,
                                                  std::chrono::milliseconds timeout = std::chrono::seconds(1));
 

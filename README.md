@@ -56,6 +56,7 @@ Connections run over TLS 1.2 and both sides present a self-signed X.509 certific
 
 ### Phone Calls
 Place, answer and end calls on the iPhone from the desktop, complete with caller ID and the phone's carrier and signal. 
+Recent calls from the iPhone are listed with a button to call back, and the iPhone's favorites are starred at the top of Contacts. These need **Phone Recents** and **Phone Favorites** turned on under the iPhone's Bluetooth settings for this computer.
 The call audio stays on the iPhone. If you've used Linux long enough you know why (it sounds like "FalsePotty-o"). PulsAlsaWire is too hard to support across all deployment targets.
 
 Stock PipeWire makes the computer a speaker for the phone, which takes call control away and moves the iPhone's music and sounds to the desktop. The recommended audio setting is in [Keeping the phone's audio on the phone](docs/BLUETOOTH.md#keeping-the-phones-audio-on-the-phone).
@@ -82,6 +83,7 @@ The extension communicates with `tetherd` via native messaging. This allows user
 
 ### Browser Extension
 - Firefox: [Tether Browser Extension](https://addons.mozilla.org/en-US/firefox/addon/tether-browser-extension/)
+- Google Chrome / Chromium: [Build and install locally](extension/README.md#local-chrome--chromium-installation).
 
 ### Mail Extension
 - Thunderbird: [Tether Mail Extension](https://addons.thunderbird.net/en-US/thunderbird/addon/tether-mail-extension/)
@@ -146,7 +148,8 @@ nix run .#tetherd
 ```
 
 Bare `nix run` launches `tether-gtk`. The named app outputs are `tether` (CLI),
-`tether-gtk` (GUI), `tetherd` (daemon), and `tether-dialog` (dialog helper).
+`tether-gtk` (GUI), `tether-tui` (terminal UI), `tetherd` (daemon), and
+`tether-dialog` (dialog helper).
 
 #### Use the package in NixOS
 
@@ -216,18 +219,18 @@ On Debian/Ubuntu:
 
 ```bash
 sudo apt install build-essential cmake ninja-build pkg-config git \
-    libwayland-dev libavahi-client-dev libssl-dev \
+    libwayland-dev libavahi-client-dev libssl-dev libsecret-1-dev \
     libglib2.0-dev libgtk-3-dev libgtk-layer-shell-dev libnotify-dev \
-    npm zip
+    libncurses-dev npm zip
 ```
 
 On Fedora:
 
 ```bash
 sudo dnf install gcc-c++ cmake ninja-build pkgconf-pkg-config git \
-    wayland-devel avahi-devel openssl-devel \
+    wayland-devel avahi-devel openssl-devel libsecret-devel \
     glib2-devel gtk3-devel gtk-layer-shell-devel libnotify-devel \
-    npm zip
+    ncurses-devel npm zip
 ```
 
 ```bash
@@ -238,7 +241,7 @@ cd tether
 # Build and test
 make release
 
-# Install the daemon, cli, and GTK app
+# Install the daemon, cli, GTK app, and terminal UI
 make install
 ```
 
@@ -308,7 +311,18 @@ tether status                                  # devices, links, and recent tran
 See [docs/HEADLESS.md](docs/HEADLESS.md), or [the container guide](docs/CONTAINER.md)
 for Docker deployment.
 
+### Terminal UI
 
+`tether-tui` is a front end for tetherd in the terminal, with vim keys: `j`/`k`
+to move, `h`/`l` between panes, `1`-`6` or `gt`/`gT` for tabs, `/` to filter,
+`i` to write in a conversation, `o` for a new message, `dd` to dismiss or
+forget, `:q` to quit. Press `?` for the full list.
+
+### Alternative web UI
+
+The [tether-web project](https://github.com/napisani/tether-web) provides a lightweight browser interface for running Tether without a desktop session. It runs `tetherd` in headless mode and lets you pair and manage a Bluetooth-connected iPhone from a browser.
+
+This setup is useful for homelabs and headless Linux servers where a full GTK desktop is not available. The iPhone must remain within Bluetooth range of the Linux host. The current interface focuses on guided pairing and connection status.
 
 ## Components
 
@@ -316,7 +330,7 @@ for Docker deployment.
 
 2. **`tether`**: A CLI to communicate with the daemon. This also allows the WebExtension to interface with the daemon via native messaging.
 
-3. **`tether-gtk`**: An application for Linux that provides a graphical interface to manage devices, send files, trigger clipboard sync, read and reply to iPhone messages, see mirrored notifications, and monitor connection status.
+3. **`tether-gtk`**: An application for Linux that provides a graphical interface to manage devices, send files, trigger clipboard sync, read and reply to iPhone messages, see mirrored notifications, and monitor connection status. **`tether-tui`** does the same in a terminal.
 
 4. **iPhone App**: Discovers the daemon via Bonjour/mDNS, utilizing Apple's `Network.framework` for secure TLS negotiation. Not required for SMS/iMessage and notification mirroring, which use Bluetooth.
 
@@ -335,6 +349,7 @@ for Docker deployment.
 - `pkg-config`
 - `ninja`
 - `gtk3` (for `tether-gtk`)
+- `ncurses` (for `tether-tui`; turn off with `-DTETHER_BUILD_TUI=OFF`)
 - `nlohmann-json`
 - `glib2`
 - `avahi`

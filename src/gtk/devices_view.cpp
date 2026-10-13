@@ -20,6 +20,7 @@ namespace tether::ui {
 
         struct DevicesState {
             std::vector<tether::DiscoveredDevice> discovered_devices;
+            std::vector<tether::DiscoveredDevice> unpaired_clients;
             std::vector<tether::DiscoveredDevice> pending_pairing_requests;
             std::vector<std::pair<std::string, std::string>> paired_devices; // fp, name
             std::vector<std::string> connected_fps;                          // active connections
@@ -138,43 +139,6 @@ namespace tether::ui {
             return nullptr;
         }
 
-        std::string json_string(const nlohmann::json& j, const char* key, const std::string& fallback = "") {
-            const auto it = j.find(key);
-            return it != j.end() && it->is_string() ? it->get<std::string>() : fallback;
-        }
-
-        // "L 82%  R 79%  Case 45%", omitting whatever is not reporting, or the reason
-        // there are no levels at all. Empty while the channel is still opening, which
-        // is the one state not worth reporting anywhere.
-        // "spoken" spells the earbuds out for screen readers instead of "L"/"R".
-        std::string airpods_status_text(const nlohmann::json& airpods, bool spoken = false) {
-            std::string text;
-            const auto append = [&](const char* label, int level) {
-                if (level < 0)
-                    return;
-                if (!text.empty())
-                    text += spoken ? ", " : "   ";
-                text += label + (" " + std::to_string(level) + "%");
-            };
-            // TRANSLATORS: Left earbud, read aloud by screen readers before its battery level.
-            const char* left_spoken = _("Left earbud");
-            // TRANSLATORS: Left earbud, abbreviated to fit the device row. One or two letters.
-            append(spoken ? left_spoken : _("L"), airpods.value("left", -1));
-            // TRANSLATORS: Right earbud, read aloud by screen readers before its battery level.
-            const char* right_spoken = _("Right earbud");
-            // TRANSLATORS: Right earbud, abbreviated to fit the device row. One or two letters.
-            append(spoken ? right_spoken : _("R"), airpods.value("right", -1));
-            // TRANSLATORS: The AirPods charging case, on the device row beside the two earbuds.
-            append(_("Case"), airpods.value("case", -1));
-            if (!text.empty())
-                return text;
-
-            const std::string status = json_string(airpods, "status");
-            if (status == "busy" || status == "failed")
-                return json_string(airpods, "reason");
-            return "";
-        }
-
         // The device row has room to say why it is empty; the tray tooltip does not.
         std::string airpods_row_text(const nlohmann::json& airpods) {
             const std::string text = airpods_status_text(airpods);
@@ -195,15 +159,6 @@ namespace tether::ui {
                 return false;
             const std::string supervised = g_devices.bt_status.value("device_address", "");
             return !supervised.empty() && supervised == address;
-        }
-
-        std::string connection_reason(const nlohmann::json& connection) {
-            const bool link_degraded =
-                !connection.value("classic_connected", false) || !connection.value("le_connected", false);
-            std::string reason = connection.value(link_degraded ? "link_reason" : "profile_reason", "");
-            if (reason.empty())
-                reason = connection.value("link_reason", "");
-            return reason;
         }
 
         void set_capability_row(GtkWidget* label, const std::string& title, bool ok, const std::string& note) {
@@ -613,6 +568,7 @@ namespace tether::ui {
             nlohmann::json j;
             j["command"] = "accept_device";
             j["fingerprint"] = g_devices.selected_device_fp;
+            j["device_name"] = g_devices.selected_device_name;
             daemon_send(j);
         }
 
@@ -851,7 +807,23 @@ namespace tether::ui {
             g_devices.mdns_ok = j.value("mdns_available", true);
             g_devices.clipboard_ok = j.value("clipboard_available", true);
             g_devices.firewall_active = j.value("firewall_active", false);
+
+            if (j.contains("discovered_devices") && j["discovered_devices"].is_array()) {
+                g_devices.discovered_devices.clear();
+                for (const auto& d : j["discovered_devices"]) {
+                    tether::DiscoveredDevice dev;
+                    dev.name = d.value("name", "");
+                    dev.fingerprint = d.value("fingerprint", "");
+                    if (d.contains("addresses") && d["addresses"].is_array()) {
+                        for (const auto& a : d["addresses"])
+                            dev.addresses.push_back({a.value("address", ""), a.value<uint16_t>("port", 5134)});
+                    }
+                    g_devices.discovered_devices.push_back(dev);
+                }
+            }
+
             g_devices.connected_fps.clear();
+            g_devices.unpaired_clients.clear();
             if (j.contains("connected_clients") && j["connected_clients"].is_array()) {
                 for (auto& c : j["connected_clients"]) {
                     if (c.value("paired", false)) {
@@ -861,7 +833,7 @@ namespace tether::ui {
                         dev.fingerprint = c.value("fingerprint", "");
                         dev.name = c.value("device_name", _("Unknown Device"));
                         dev.addresses.push_back({c.value("address", ""), 5134});
-                        g_devices.discovered_devices.push_back(dev);
+                        g_devices.unpaired_clients.push_back(dev);
                     }
                 }
             }
@@ -945,6 +917,8 @@ namespace tether::ui {
             GtkWidget* title = gtk_label_new(nullptr);
             gtk_label_set_markup(GTK_LABEL(title), ("<b>" + escape_markup(name) + "</b>").c_str());
             gtk_label_set_xalign(GTK_LABEL(title), 0.0);
+            gtk_label_set_ellipsize(GTK_LABEL(title), PANGO_ELLIPSIZE_END);
+            gtk_label_set_max_width_chars(GTK_LABEL(title), 18);
             gtk_box_pack_start(GTK_BOX(labels), title, FALSE, FALSE, 0);
 
             GtkWidget* subtitle =
@@ -985,6 +959,8 @@ namespace tether::ui {
             GtkWidget* title = gtk_label_new(nullptr);
             gtk_label_set_markup(GTK_LABEL(title), ("<b>" + escape_markup(name) + "</b>").c_str());
             gtk_label_set_xalign(GTK_LABEL(title), 0.0);
+            gtk_label_set_ellipsize(GTK_LABEL(title), PANGO_ELLIPSIZE_END);
+            gtk_label_set_max_width_chars(GTK_LABEL(title), 18);
             gtk_box_pack_start(GTK_BOX(labels), title, FALSE, FALSE, 0);
 
             // "Partially connected" is about the iPhone's message and notification
@@ -1049,22 +1025,28 @@ namespace tether::ui {
             }
         }
 
-        for (const auto& disc : g_devices.discovered_devices) {
-            if (disc.fingerprint == my_fp)
-                continue;
-            bool is_paired = false;
-            for (const auto& p : g_devices.paired_devices) {
-                if (p.first == disc.fingerprint) {
-                    is_paired = true;
-                    break;
+        std::vector<std::string> shown_fps;
+        for (const auto* source : {&g_devices.discovered_devices, &g_devices.unpaired_clients}) {
+            for (const auto& disc : *source) {
+                if (disc.fingerprint == my_fp)
+                    continue;
+                if (std::find(shown_fps.begin(), shown_fps.end(), disc.fingerprint) != shown_fps.end())
+                    continue;
+                bool is_paired = false;
+                for (const auto& p : g_devices.paired_devices) {
+                    if (p.first == disc.fingerprint) {
+                        is_paired = true;
+                        break;
+                    }
                 }
+                if (is_paired)
+                    continue; // already added above
+                shown_fps.push_back(disc.fingerprint);
+                std::string ip = disc.addresses.empty() ? "" : disc.addresses[0].address;
+                uint16_t port = disc.addresses.empty() ? 5134 : disc.addresses[0].port;
+                GtkWidget* r = create_row(disc.name, disc.fingerprint, ip, port, false, false);
+                discovered_rows.push_back(r);
             }
-            if (is_paired)
-                continue; // already added above
-            std::string ip = disc.addresses.empty() ? "" : disc.addresses[0].address;
-            uint16_t port = disc.addresses.empty() ? 5134 : disc.addresses[0].port;
-            GtkWidget* r = create_row(disc.name, disc.fingerprint, ip, port, false, false);
-            discovered_rows.push_back(r);
         }
 
         // Render Pending Pair Requests
@@ -1079,15 +1061,8 @@ namespace tether::ui {
             if (is_paired)
                 continue; // ignore if they successfully paired
 
-            bool already_shown = false;
-            for (const auto& disc : g_devices.discovered_devices) {
-                if (disc.fingerprint == req.fingerprint) {
-                    already_shown = true;
-                    break;
-                }
-            }
-            if (already_shown)
-                continue; // ignore if mDNS already populated it
+            if (std::find(shown_fps.begin(), shown_fps.end(), req.fingerprint) != shown_fps.end())
+                continue; // ignore if mDNS or a live connection already populated it
 
             std::string ip = req.addresses.empty() ? "" : req.addresses[0].address;
             uint16_t port = req.addresses.empty() ? 5134 : req.addresses[0].port;
@@ -1448,23 +1423,35 @@ namespace tether::ui {
         GtkWidget* left_scroll = gtk_scrolled_window_new(nullptr, nullptr);
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(left_scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
         gtk_widget_set_size_request(left_scroll, 220, -1);
+        style(left_scroll, "tether-thread-pane");
 
         g_devices.list_devices = gtk_list_box_new();
+        gtk_style_context_add_class(gtk_widget_get_style_context(g_devices.list_devices), "tether-list");
         g_signal_connect(g_devices.list_devices, "row-selected", G_CALLBACK(on_device_selected), nullptr);
         gtk_container_add(GTK_CONTAINER(left_scroll), g_devices.list_devices);
         gtk_paned_pack1(GTK_PANED(paned), left_scroll, FALSE, FALSE);
 
         // Right Pane
         g_devices.right_pane_stack = gtk_stack_new();
+        // A hidden device page must not impose its minimum width on this one.
+        gtk_stack_set_hhomogeneous(GTK_STACK(g_devices.right_pane_stack), FALSE);
+        gtk_stack_set_vhomogeneous(GTK_STACK(g_devices.right_pane_stack), FALSE);
         gtk_stack_set_transition_type(GTK_STACK(g_devices.right_pane_stack), GTK_STACK_TRANSITION_TYPE_CROSSFADE);
 
         // Placeholder, which on a machine with nothing paired is the first thing
         // anyone sees: it explains both routes rather than saying "select a device".
         GtkWidget* placeholder = gtk_box_new(GTK_ORIENTATION_VERTICAL, 24);
         gtk_container_set_border_width(GTK_CONTAINER(placeholder), 24);
-        gtk_widget_set_valign(placeholder, GTK_ALIGN_CENTER);
+        gtk_widget_set_valign(placeholder, GTK_ALIGN_START);
+        GtkWidget* hero = navigation_icon("devices", 48);
+        style(hero, "tether-hero-icon");
+        gtk_widget_set_halign(hero, GTK_ALIGN_CENTER);
+        gtk_box_pack_start(GTK_BOX(placeholder), hero, FALSE, FALSE, 0);
 
         GtkWidget* welcome_title = gtk_label_new(nullptr);
+        style(welcome_title, "tether-hero-title");
+        gtk_label_set_line_wrap(GTK_LABEL(welcome_title), TRUE);
+        gtk_label_set_justify(GTK_LABEL(welcome_title), GTK_JUSTIFY_CENTER);
         set_markup(welcome_title, "<big><b>" + escape_markup(_("Connect your iPhone")) + "</b></big>");
         gtk_box_pack_start(GTK_BOX(placeholder), welcome_title, FALSE, FALSE, 0);
 
@@ -1483,6 +1470,7 @@ namespace tether::ui {
             [](const char* icon_name, const char* title, const char* steps, GtkWidget** status_out) {
                 GtkWidget* block = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
                 gtk_widget_set_valign(block, GTK_ALIGN_START);
+                style(block, "tether-card");
 
                 GtkWidget* heading = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
                 gtk_box_pack_start(
@@ -1531,6 +1519,7 @@ namespace tether::ui {
         // One button for both routes: scanning is what refreshes either list.
         GtkWidget* welcome_scan = gtk_button_new_with_label(_("Scan for devices"));
         gtk_widget_set_halign(welcome_scan, GTK_ALIGN_CENTER);
+        style(welcome_scan, "suggested-action");
         g_signal_connect(welcome_scan,
                          "clicked",
                          G_CALLBACK(+[](GtkWidget*, gpointer) { devices_view_trigger_discovery(); }),
@@ -1540,10 +1529,15 @@ namespace tether::ui {
 
         // AirPods: battery and the listening mode, which is all the buds expose.
         GtkWidget* airpods_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 16);
-        gtk_container_set_border_width(GTK_CONTAINER(airpods_box), 32);
-        gtk_widget_set_valign(airpods_box, GTK_ALIGN_CENTER);
+        gtk_container_set_border_width(GTK_CONTAINER(airpods_box), 8);
+        gtk_widget_set_valign(airpods_box, GTK_ALIGN_START);
+        style(airpods_box, "tether-detail");
 
         g_devices.chk_airpods_enabled = gtk_check_button_new_with_label(_("Manage AirPods from Tether"));
+        GtkWidget* chk_airpods_enabled_label = gtk_bin_get_child(GTK_BIN(g_devices.chk_airpods_enabled));
+        gtk_label_set_line_wrap(GTK_LABEL(chk_airpods_enabled_label), TRUE);
+        gtk_label_set_line_wrap_mode(GTK_LABEL(chk_airpods_enabled_label), PANGO_WRAP_WORD_CHAR);
+        gtk_label_set_max_width_chars(GTK_LABEL(chk_airpods_enabled_label), 28);
         gtk_widget_set_tooltip_text(g_devices.chk_airpods_enabled,
                                     _("The AirPods channel takes one program per computer. Turning this off "
                                       "releases it, so another AirPods program can use it."));
@@ -1551,6 +1545,10 @@ namespace tether::ui {
         gtk_box_pack_start(GTK_BOX(airpods_box), g_devices.chk_airpods_enabled, FALSE, FALSE, 0);
 
         g_devices.lbl_airpods_name = gtk_label_new(nullptr);
+        style(g_devices.lbl_airpods_name, "tether-hero-title");
+        gtk_label_set_line_wrap(GTK_LABEL(g_devices.lbl_airpods_name), TRUE);
+        gtk_label_set_max_width_chars(GTK_LABEL(g_devices.lbl_airpods_name), 24);
+        gtk_label_set_line_wrap_mode(GTK_LABEL(g_devices.lbl_airpods_name), PANGO_WRAP_WORD_CHAR);
         gtk_label_set_xalign(GTK_LABEL(g_devices.lbl_airpods_name), 0.0);
         gtk_box_pack_start(GTK_BOX(airpods_box), g_devices.lbl_airpods_name, FALSE, FALSE, 0);
 
@@ -1569,8 +1567,11 @@ namespace tether::ui {
         set_markup(lbl_mode_title, "<b>" + escape_markup(_("Listening mode")) + "</b>");
         gtk_box_pack_start(GTK_BOX(airpods_box), lbl_mode_title, FALSE, FALSE, 0);
 
-        GtkWidget* modes = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-        gtk_style_context_add_class(gtk_widget_get_style_context(modes), "linked");
+        GtkWidget* modes = gtk_grid_new();
+        gtk_grid_set_column_homogeneous(GTK_GRID(modes), TRUE);
+        gtk_grid_set_row_spacing(GTK_GRID(modes), 6);
+        gtk_grid_set_column_spacing(GTK_GRID(modes), 6);
+        style(modes, "tether-modes");
         AtkObject* modes_a11y = gtk_widget_get_accessible(modes);
         atk_object_set_role(modes_a11y, ATK_ROLE_PANEL);
         atk_object_add_relationship(modes_a11y, ATK_RELATION_LABELLED_BY, gtk_widget_get_accessible(lbl_mode_title));
@@ -1583,13 +1584,18 @@ namespace tether::ui {
                 group = button;
             g_signal_connect(button, "toggled", G_CALLBACK(on_airpods_mode_toggled), GINT_TO_POINTER(i));
             g_devices.airpods_mode_buttons[i] = button;
-            gtk_box_pack_start(GTK_BOX(modes), button, TRUE, TRUE, 0);
+            gtk_grid_attach(GTK_GRID(modes), button, i % 2, i / 2, 1, 1);
         }
-        gtk_box_pack_start(GTK_BOX(airpods_box), modes, FALSE, FALSE, 0);
+        GtkWidget* listening_card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+        style(listening_card, "tether-card");
+        gtk_box_pack_start(GTK_BOX(listening_card), modes, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(airpods_box), listening_card, FALSE, FALSE, 0);
 
         g_devices.lbl_airpods_reason = gtk_label_new(nullptr);
         gtk_label_set_xalign(GTK_LABEL(g_devices.lbl_airpods_reason), 0.0);
         gtk_label_set_line_wrap(GTK_LABEL(g_devices.lbl_airpods_reason), TRUE);
+        gtk_label_set_max_width_chars(GTK_LABEL(g_devices.lbl_airpods_reason), 30);
+        gtk_label_set_line_wrap_mode(GTK_LABEL(g_devices.lbl_airpods_reason), PANGO_WRAP_WORD_CHAR);
         gtk_style_context_add_class(gtk_widget_get_style_context(g_devices.lbl_airpods_reason), "muted");
         gtk_box_pack_start(GTK_BOX(airpods_box), g_devices.lbl_airpods_reason, FALSE, FALSE, 0);
 
@@ -1604,7 +1610,7 @@ namespace tether::ui {
         gtk_style_context_add_class(gtk_widget_get_style_context(g_devices.lbl_airpods_worn), "muted");
         gtk_box_pack_start(GTK_BOX(airpods_box), g_devices.lbl_airpods_worn, FALSE, FALSE, 0);
 
-        GtkWidget* pause_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        GtkWidget* pause_row = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
         GtkWidget* pause_label = gtk_label_new(_("Pause playback when:"));
         gtk_box_pack_start(GTK_BOX(pause_row), pause_label, FALSE, FALSE, 0);
         g_devices.cmb_airpods_pause = gtk_combo_box_text_new();
@@ -1626,6 +1632,10 @@ namespace tether::ui {
 
         g_devices.chk_airpods_handoff =
             gtk_check_button_new_with_label(_("Hand the AirPods to the iPhone during a call"));
+        GtkWidget* chk_airpods_handoff_label = gtk_bin_get_child(GTK_BIN(g_devices.chk_airpods_handoff));
+        gtk_label_set_line_wrap(GTK_LABEL(chk_airpods_handoff_label), TRUE);
+        gtk_label_set_line_wrap_mode(GTK_LABEL(chk_airpods_handoff_label), PANGO_WRAP_WORD_CHAR);
+        gtk_label_set_max_width_chars(GTK_LABEL(chk_airpods_handoff_label), 28);
         gtk_widget_set_tooltip_text(g_devices.chk_airpods_handoff,
                                     _("Pauses playback and disconnects the AirPods so the iPhone can take them, "
                                       "then reconnects them when the call ends. Needs call control, and only "
@@ -1636,6 +1646,8 @@ namespace tether::ui {
         g_devices.lbl_airpods_apple_id = gtk_label_new(nullptr);
         gtk_label_set_xalign(GTK_LABEL(g_devices.lbl_airpods_apple_id), 0.0);
         gtk_label_set_line_wrap(GTK_LABEL(g_devices.lbl_airpods_apple_id), TRUE);
+        gtk_label_set_max_width_chars(GTK_LABEL(g_devices.lbl_airpods_apple_id), 30);
+        gtk_label_set_line_wrap_mode(GTK_LABEL(g_devices.lbl_airpods_apple_id), PANGO_WRAP_WORD_CHAR);
         gtk_label_set_selectable(GTK_LABEL(g_devices.lbl_airpods_apple_id), TRUE);
         gtk_style_context_add_class(gtk_widget_get_style_context(g_devices.lbl_airpods_apple_id), "muted");
         gtk_box_pack_start(GTK_BOX(airpods_box), g_devices.lbl_airpods_apple_id, FALSE, FALSE, 0);
@@ -1644,10 +1656,15 @@ namespace tether::ui {
 
         // Bluetooth
         GtkWidget* bt_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 16);
-        gtk_container_set_border_width(GTK_CONTAINER(bt_box), 32);
-        gtk_widget_set_valign(bt_box, GTK_ALIGN_CENTER);
+        gtk_container_set_border_width(GTK_CONTAINER(bt_box), 8);
+        gtk_widget_set_valign(bt_box, GTK_ALIGN_START);
+        style(bt_box, "tether-detail");
 
         g_devices.lbl_bt_name = gtk_label_new(nullptr);
+        style(g_devices.lbl_bt_name, "tether-hero-title");
+        gtk_label_set_line_wrap(GTK_LABEL(g_devices.lbl_bt_name), TRUE);
+        gtk_label_set_max_width_chars(GTK_LABEL(g_devices.lbl_bt_name), 24);
+        gtk_label_set_line_wrap_mode(GTK_LABEL(g_devices.lbl_bt_name), PANGO_WRAP_WORD_CHAR);
         gtk_label_set_xalign(GTK_LABEL(g_devices.lbl_bt_name), 0.0);
         gtk_box_pack_start(GTK_BOX(bt_box), g_devices.lbl_bt_name, FALSE, FALSE, 0);
 
@@ -1671,6 +1688,7 @@ namespace tether::ui {
         gtk_label_set_xalign(GTK_LABEL(g_devices.lbl_bt_setup_command), 0.0);
         gtk_label_set_selectable(GTK_LABEL(g_devices.lbl_bt_setup_command), TRUE);
         gtk_label_set_line_wrap(GTK_LABEL(g_devices.lbl_bt_setup_command), TRUE);
+        gtk_label_set_line_wrap_mode(GTK_LABEL(g_devices.lbl_bt_setup_command), PANGO_WRAP_WORD_CHAR);
         gtk_style_context_add_class(gtk_widget_get_style_context(g_devices.lbl_bt_setup_command),
                                     "tether-setup-command");
         gtk_box_pack_start(GTK_BOX(g_devices.bt_setup_box), g_devices.lbl_bt_setup_command, FALSE, FALSE, 0);
@@ -1687,10 +1705,14 @@ namespace tether::ui {
         g_devices.lbl_bt_mode = gtk_label_new(nullptr);
         gtk_label_set_xalign(GTK_LABEL(g_devices.lbl_bt_mode), 0.0);
         gtk_label_set_line_wrap(GTK_LABEL(g_devices.lbl_bt_mode), TRUE);
+        gtk_label_set_max_width_chars(GTK_LABEL(g_devices.lbl_bt_mode), 30);
         gtk_style_context_add_class(gtk_widget_get_style_context(g_devices.lbl_bt_mode), "muted");
         gtk_box_pack_start(GTK_BOX(bt_box), g_devices.lbl_bt_mode, FALSE, FALSE, 0);
 
-        GtkWidget* capabilities = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+        GtkWidget* capabilities = gtk_box_new(GTK_ORIENTATION_VERTICAL, 14);
+        style(capabilities, "tether-card");
+        const char* capability_icons[] = {"devices", "messages", "contacts", "notifications"};
+        size_t capability_index = 0;
         for (GtkWidget** label : {&g_devices.lbl_bt_link,
                                   &g_devices.lbl_bt_messages,
                                   &g_devices.lbl_bt_contacts,
@@ -1698,11 +1720,19 @@ namespace tether::ui {
             *label = gtk_label_new(nullptr);
             gtk_label_set_xalign(GTK_LABEL(*label), 0.0);
             gtk_label_set_line_wrap(GTK_LABEL(*label), TRUE);
-            gtk_box_pack_start(GTK_BOX(capabilities), *label, FALSE, FALSE, 0);
+            GtkWidget* capability_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+            gtk_box_pack_start(
+                GTK_BOX(capability_row), navigation_icon(capability_icons[capability_index++]), FALSE, FALSE, 0);
+            gtk_box_pack_start(GTK_BOX(capability_row), *label, TRUE, TRUE, 0);
+            gtk_box_pack_start(GTK_BOX(capabilities), capability_row, FALSE, FALSE, 0);
         }
         gtk_box_pack_start(GTK_BOX(bt_box), capabilities, FALSE, FALSE, 0);
 
         g_devices.chk_bt_enabled = gtk_check_button_new_with_label(_("Connect to this iPhone over Bluetooth"));
+        GtkWidget* chk_bt_enabled_label = gtk_bin_get_child(GTK_BIN(g_devices.chk_bt_enabled));
+        gtk_label_set_line_wrap(GTK_LABEL(chk_bt_enabled_label), TRUE);
+        gtk_label_set_line_wrap_mode(GTK_LABEL(chk_bt_enabled_label), PANGO_WRAP_WORD_CHAR);
+        gtk_label_set_max_width_chars(GTK_LABEL(chk_bt_enabled_label), 28);
         gtk_widget_set_tooltip_text(g_devices.chk_bt_enabled,
                                     _("Keep the Bluetooth link to the iPhone up, reconnecting whenever it drops. "
                                       "Turning this off stops Tether reconnecting; a link that is already up stays "
@@ -1713,6 +1743,8 @@ namespace tether::ui {
         g_devices.lbl_bt_reason = gtk_label_new(nullptr);
         gtk_label_set_xalign(GTK_LABEL(g_devices.lbl_bt_reason), 0.0);
         gtk_label_set_line_wrap(GTK_LABEL(g_devices.lbl_bt_reason), TRUE);
+        gtk_label_set_max_width_chars(GTK_LABEL(g_devices.lbl_bt_reason), 30);
+        gtk_label_set_line_wrap_mode(GTK_LABEL(g_devices.lbl_bt_reason), PANGO_WRAP_WORD_CHAR);
         gtk_style_context_add_class(gtk_widget_get_style_context(g_devices.lbl_bt_reason), "muted");
         gtk_box_pack_start(GTK_BOX(bt_box), g_devices.lbl_bt_reason, FALSE, FALSE, 0);
 
@@ -1737,6 +1769,7 @@ namespace tether::ui {
         g_devices.lbl_bt_progress = gtk_label_new(nullptr);
         gtk_label_set_xalign(GTK_LABEL(g_devices.lbl_bt_progress), 0.0);
         gtk_label_set_line_wrap(GTK_LABEL(g_devices.lbl_bt_progress), TRUE);
+        gtk_label_set_line_wrap_mode(GTK_LABEL(g_devices.lbl_bt_progress), PANGO_WRAP_WORD_CHAR);
         gtk_style_context_add_class(gtk_widget_get_style_context(g_devices.lbl_bt_progress), "muted");
         gtk_box_pack_start(GTK_BOX(bt_box), g_devices.lbl_bt_progress, FALSE, FALSE, 0);
 
@@ -1747,6 +1780,7 @@ namespace tether::ui {
         gtk_widget_set_valign(pair_box, GTK_ALIGN_CENTER);
         gtk_widget_set_halign(pair_box, GTK_ALIGN_CENTER);
         g_devices.lbl_unpaired_name = gtk_label_new(nullptr);
+        style(g_devices.lbl_unpaired_name, "tether-hero-title");
         gtk_box_pack_start(GTK_BOX(pair_box), g_devices.lbl_unpaired_name, FALSE, FALSE, 0);
         g_devices.lbl_unpaired_ip = gtk_label_new(nullptr);
         gtk_style_context_add_class(gtk_widget_get_style_context(g_devices.lbl_unpaired_ip), "muted");
@@ -1766,14 +1800,19 @@ namespace tether::ui {
 
         // Action
         GtkWidget* action_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 24);
-        gtk_container_set_border_width(GTK_CONTAINER(action_box), 32);
-        gtk_widget_set_valign(action_box, GTK_ALIGN_CENTER);
+        gtk_container_set_border_width(GTK_CONTAINER(action_box), 8);
+        gtk_widget_set_valign(action_box, GTK_ALIGN_START);
+        style(action_box, "tether-detail");
 
         g_devices.lbl_action_name = gtk_label_new(nullptr);
+        style(g_devices.lbl_action_name, "tether-hero-title");
+        gtk_label_set_line_wrap(GTK_LABEL(g_devices.lbl_action_name), TRUE);
+        gtk_label_set_max_width_chars(GTK_LABEL(g_devices.lbl_action_name), 24);
+        gtk_label_set_line_wrap_mode(GTK_LABEL(g_devices.lbl_action_name), PANGO_WRAP_WORD_CHAR);
         gtk_widget_set_halign(g_devices.lbl_action_name, GTK_ALIGN_CENTER);
         gtk_box_pack_start(GTK_BOX(action_box), g_devices.lbl_action_name, FALSE, FALSE, 0);
 
-        GtkWidget* btn_grid = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+        GtkWidget* btn_grid = gtk_box_new(GTK_ORIENTATION_VERTICAL, 18);
         gtk_widget_set_halign(btn_grid, GTK_ALIGN_CENTER);
         g_devices.btn_grid = btn_grid;
 
@@ -1783,6 +1822,8 @@ namespace tether::ui {
         g_devices.dropzone = dropzone;
         gtk_box_pack_start(GTK_BOX(btn_grid), dropzone, FALSE, FALSE, 0);
 
+        GtkWidget* transfer_icon = gtk_image_new_from_icon_name("folder-download-symbolic", GTK_ICON_SIZE_DIALOG);
+        gtk_box_pack_start(GTK_BOX(dropzone), transfer_icon, FALSE, FALSE, 0);
         GtkWidget* lbl_drop = gtk_label_new(_("Drop files here to send"));
         gtk_style_context_add_class(gtk_widget_get_style_context(lbl_drop), "muted");
         gtk_box_pack_start(GTK_BOX(dropzone), lbl_drop, FALSE, FALSE, 0);
@@ -1802,7 +1843,15 @@ namespace tether::ui {
                              set_status_action(_("Clipboard sync requested..."));
                          }),
                          nullptr);
-        gtk_box_pack_start(GTK_BOX(btn_grid), btn_send_clip, FALSE, FALSE, 0);
+        GtkWidget* clipboard_card = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 16);
+        style(clipboard_card, "tether-card");
+        gtk_box_pack_start(GTK_BOX(clipboard_card),
+                           gtk_image_new_from_icon_name("edit-paste-symbolic", GTK_ICON_SIZE_LARGE_TOOLBAR),
+                           FALSE,
+                           FALSE,
+                           0);
+        gtk_box_pack_start(GTK_BOX(clipboard_card), btn_send_clip, TRUE, TRUE, 0);
+        gtk_box_pack_start(GTK_BOX(btn_grid), clipboard_card, FALSE, FALSE, 0);
 
         gtk_box_pack_start(GTK_BOX(action_box), btn_grid, FALSE, FALSE, 0);
 
@@ -1846,7 +1895,11 @@ namespace tether::ui {
 
         gtk_stack_add_named(GTK_STACK(g_devices.right_pane_stack), action_page, "action");
 
-        gtk_paned_pack2(GTK_PANED(paned), g_devices.right_pane_stack, TRUE, FALSE);
+        GtkWidget* right_scroll = gtk_scrolled_window_new(nullptr, nullptr);
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(right_scroll), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+        gtk_scrolled_window_set_propagate_natural_width(GTK_SCROLLED_WINDOW(right_scroll), FALSE);
+        gtk_container_add(GTK_CONTAINER(right_scroll), g_devices.right_pane_stack);
+        gtk_paned_pack2(GTK_PANED(paned), right_scroll, TRUE, FALSE);
         gtk_stack_set_visible_child_name(GTK_STACK(g_devices.right_pane_stack), "placeholder");
 
         return paned;

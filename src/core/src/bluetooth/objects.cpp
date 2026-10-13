@@ -18,6 +18,7 @@ namespace tether::bluetooth {
         constexpr const char* IFACE_TELEPHONY = "org.bluez.Telephony1";
         constexpr const char* IFACE_CALL = "org.bluez.Call1";
         constexpr const char* IFACE_LE_ADV_MGR = "org.bluez.LEAdvertisingManager1";
+        constexpr const char* IFACE_ADV_MONITOR_MGR = "org.bluez.AdvertisementMonitorManager1";
         constexpr const char* IFACE_BEARER_LE = "org.bluez.Bearer.LE1";
         constexpr const char* IFACE_BEARER_BREDR = "org.bluez.Bearer.BREDR1";
         constexpr const char* IFACE_CHARACTERISTIC = "org.bluez.GattCharacteristic1";
@@ -182,6 +183,11 @@ namespace tether::bluetooth {
                 a.advertising_instances = get_byte(adv, "SupportedInstances");
                 a.advertising_active_instances = get_byte(adv, "ActiveInstances");
                 g_variant_unref(adv);
+            }
+
+            if (GVariant* mon = g_variant_lookup_value(ifaces, IFACE_ADV_MONITOR_MGR, G_VARIANT_TYPE("a{sv}"))) {
+                a.has_adv_monitor_manager = true;
+                g_variant_unref(mon);
             }
 
             out.adapters.push_back(std::move(a));
@@ -415,6 +421,10 @@ namespace tether::bluetooth {
             }
         }
 
+        // bluetoothd builds the advertisement monitor manager only when the experimental API is on
+        out.experimental_api = std::any_of(
+            out.adapters.begin(), out.adapters.end(), [](const Adapter& a) { return a.has_adv_monitor_manager; });
+
         // BlueZ enumerates in a stable but unspecified order; sorting keeps
         // snapshot comparison and UI listing deterministic.
         std::sort(out.adapters.begin(), out.adapters.end(), [](const Adapter& a, const Adapter& b) {
@@ -561,6 +571,8 @@ namespace tether::bluetooth {
                 // bond has an LE half. Only Bearer.LE1.Bonded says that.
                 if (d.has_le_bearer && d.le_bonded)
                     cap.bond_has_le = true;
+                if (d.ancs_notifying)
+                    cap.bond_carries_ancs = true;
             }
         }
         if (cap.bearer_api != BearerApi::Confirmed)
@@ -605,7 +617,7 @@ namespace tether::bluetooth {
             cap.reasons.emplace_back(_("Bearer API support is unconfirmed until a device is bonded."));
         }
 
-        if (cap.bonded_device_present && !cap.bond_has_le) {
+        if (cap.bonded_device_present && !cap.bond_has_le && !cap.bond_carries_ancs) {
             std::string reason = _("A device is bonded, but the bond covers BR/EDR only -- no LE keys were derived, "
                                    "so notification mirroring cannot work on it.");
 
@@ -697,6 +709,7 @@ namespace tether::bluetooth {
             {"class_ok", c.class_ok},
             {"bonded_device_present", c.bonded_device_present},
             {"bond_has_le", c.bond_has_le},
+            {"bond_carries_ancs", c.bond_carries_ancs},
             {"secure_connections",
              c.secure_connections_known ? nlohmann::json(c.secure_connections) : nlohmann::json(nullptr)},
             {"adapter_id", c.adapter_id},

@@ -10,6 +10,37 @@ All communication happens via **newline-delimited JSON**. Every individual comma
 
 If a payload arrives that cannot be parsed as JSON, the daemon will gracefully ignore it. After successfully processing a message, the server currently sends an ad-hoc text response `OK\n`, though standard JSON responses may replace this over time.
 
+### `protocol_info` (Local client -> Daemon)
+
+**Payload**: `{"command":"protocol_info"}`. The daemon answers the requesting
+Unix socket with `{"command":"protocol_info","version":1,"capabilities":[...]}`
+and sends the same event to local subscribers. Version 1 supports optional
+`operation_id` correlation on Bluetooth pairing commands and exposes the
+`apple_nearby` device hint. Capability names describe usable feature groups;
+`calls` is advertised only while calls are enabled and BlueZ is running, and
+`clipboard` only when the host compositor offers clipboard access. Other
+features have separate status and permission events, so a capability is not a
+promise that a phone is connected or has granted permissions. Older clients may
+ignore this message.
+
+---
+
+### `hello` (both directions, paired only)
+
+**Description**: Feature negotiation. A paired client sends it once connected, and the daemon answers with its own. Each side uses a feature only after the other has announced it. An older daemon answers `OK`, which means no optional features.
+
+**Payload**:
+```json
+{
+  "command": "hello",
+  "features": ["clipboard_image"]
+}
+```
+
+| Feature | Meaning |
+|---|---|
+| `clipboard_image` | [Clipboard images](#clipboard-images-both-directions) |
+
 ---
 
 ## 1. Clipboard Sync
@@ -67,6 +98,18 @@ The clipboard capabilities allow seamless copying and pasting between the Host (
 ### `clipboard_send` (Local client -> Daemon)
 
 **Description**: Local socket only. Broadcasts the current Host clipboard to clients as `clipboard_updated`, and replies with `clipboard_content`. Nothing is broadcast when the clipboard is empty.
+
+---
+
+### Clipboard images (both directions)
+
+Needs `clipboard_image` from both sides' [`hello`](#hello-both-directions-paired-only). A PNG travels as a [file transfer](#2-file-transfers) named `clipboard.png`. Its `file_start` carries a `"clipboard"` field:
+
+- `"set"` (Client -> Daemon): treated like `clipboard_set`. The daemon puts the PNG on the Wayland clipboard as `image/png` and relays it to other clients as `"updated"`. It is dropped unless every declared byte arrives and it starts with the PNG signature.
+- `"updated"` (Daemon -> Clients): the Host selection changed to one that offers `image/png` and no text type. Treated like `clipboard_updated`.
+- `"content"` (Daemon -> Client): the reply to `clipboard_get` when the selection is an image. Treated like `clipboard_content`.
+
+Images over 32 MB are not sent or accepted. A client without `clipboard_image` gets no images. Its `clipboard_get` returns the last copied text.
 
 ---
 
@@ -236,6 +279,10 @@ Trusts a pending pair request by moving the target fingerprint into the daemon's
 then replies with `{"command":"accept_device_result","accepted":true,"connected":true}`. `connected` is false
 when the trust record was saved for a device that is no longer connected.
 
+A pending request expires an hour after it arrives, and an explicit rejection drops it at once. A peer
+that still wants to pair re-sends `pair_request` on its next connection, so the only thing a longer
+window buys is dead requests in the device list.
+
 ### `forget_device` (Local Client -> Daemon)
 Removes a fingerprint from `known_hosts.json` and closes any live session holding it.
 **Payload**: `{"command": "forget_device", "fingerprint": "12:aa:bb:cc..."}`
@@ -245,8 +292,13 @@ a peer: a node that still trusts it will keep dialling it (see §3).
 
 ### `send_file` (Local Client -> Daemon)
 Offloads an entire file transfer to the daemon. The daemon spawns a thread to read the local filesystem and pushes the chunks sequence securely.
-**Payload**: `{"command": "send_file", "path": "/absolute/path/to/my_video.mp4"}`
-**Response**: `{"command": "file_send_complete", "success": true, "message": "Sent my_video.mp4"}`
+**Payload**: `{"command": "send_file", "path": "/absolute/path/to/my_video.mp4", "operation_id": "file-1"}`
+The `operation_id` is optional. When supplied, the asynchronous
+`file_send_complete` event echoes it, including on failure, so a local client
+can match the result to its request. Existing clients may omit it; their result
+remains `{"command": "file_send_complete", "success": true, "message": "Sent my_video.mp4"}`.
+The ID correlates results and does not authorize the request. The file must
+remain available at the path until the terminal result arrives.
 
 ---
 
@@ -311,13 +363,23 @@ Reports adapter capability and the resolved delivery mode.
 **Payload**: `{"command": "bt_list_devices"}`
 **Response**: `{"command": "bt_devices", "devices": [...]}`, each entry carrying address,
 name, `paired`, `bonded`, `connected`, `le_bearer`, and whether the device advertises
-`map`, `pbap`, and `ancs`.
+`map`, `pbap`, and `ancs`. `apple_nearby` is true when the current BlueZ
+advertisement contains Apple's Nearby payload, allowing external UIs to identify
+an unpaired iPhone candidate without guessing from its name. It is only a
+presentation hint, never proof of pairing or authorization.
 
 #### `bt_pair` / `bt_unpair` (Client -> Daemon, broadcast)
-**Payload**: `{"command": "bt_pair", "address": "AA:BB:CC:DD:EE:FF"}`
-Runs asynchronously and reports through `bt_pair_progress` events, then one
-`bt_pair_result` (or `bt_unpair_result`). Only one pairing transaction runs at a time; a
-second returns `{"status": "busy"}`. A successful pair selects the device and starts
+**Payload**: `{"command": "bt_pair", "address": "AA:BB:CC:DD:EE:FF", "operation_id": "pair-1"}`
+`bt_unpair` accepts the same optional `operation_id`. The daemon echoes it in
+pairing progress, confirmation, and result events for client-local correlation.
+When prompted for numeric comparison, reply with
+`{"command":"bt_pair_confirm","operation_id":"pair-1","accept":true}`
+only after the user explicitly verifies the matching code. A mismatched ID
+cannot settle the active confirmation; IDs are not authorization. Legacy local
+clients may omit the ID. Pairing runs asynchronously and reports through
+`bt_pair_progress` events, then one `bt_pair_result` (or `bt_unpair_result`).
+Only one pairing transaction runs at a time; a second returns
+`{"status": "busy"}`. A successful pair selects the device and starts
 supervision.
 
 #### `bt_set_device` (Client -> Daemon)
@@ -463,9 +525,12 @@ Writes through to the phone over OBEX, so it answers asynchronously with a
 `bt_message_read` event carrying `success` and, on failure, `message`.
 
 #### `bt_send_message` (Client -> Daemon, broadcast)
-**Payload**: `{"command": "bt_send_message", "thread": "tel:+15035550101", "body": "on my way"}`
+**Payload**: `{"command": "bt_send_message", "thread": "tel:+15035550101", "body": "on my way", "operation_id": "send-1"}`
 Builds a bMessage and pushes it to the phone's outbox. Answers asynchronously with
-`bt_send_result` (`success`, and `message` when it failed).
+`bt_send_result` (`thread`, `success`, and `message` when it failed). The optional
+`operation_id` is echoed in that result, including on failure; legacy clients
+may omit it. It correlates a local client's send with the result and does not
+authorize the request.
 
 Recipients are validated before they are interpolated into the bMessage: an address
 containing CR, LF, or a vCard delimiter is rejected rather than escaped, because such an
@@ -485,6 +550,13 @@ Broadcast once per newly observed message, incoming or locally sent.
 **Response**: `{"command": "bt_notifications", "notifications": [...]}` with `uid`,
 `app_id`, `app_name`, `title`, `subtitle`, `body`, `category`, `timestamp`, and which
 actions the notification offers.
+
+There is no destination URL or deep link. ANCS
+[`GetNotificationAttributes`](https://developer.apple.com/library/archive/documentation/CoreBluetooth/Reference/AppleNotificationCenterServiceSpecification/Specification/Specification.html)
+defines only app identifier, title, subtitle, message, message size, date, and
+positive/negative action labels, and actions run only on the iPhone. A client can open the
+app by `app_id`, but not a specific conversation or post. A URL is usable only if it
+appears in full in `title`, `subtitle` or `body`, and iOS may truncate those.
 
 `app_name` is the app's display name, resolved over ANCS `GetAppAttributes` and cached
 per bundle id for the session. The first notification from an app carries a name derived

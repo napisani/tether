@@ -170,19 +170,6 @@ namespace tether::ui {
             set_composer_text(draft == g_messages.drafts.end() ? "" : draft->second);
         }
 
-        std::string format_timestamp(int64_t epoch) {
-            if (epoch <= 0)
-                return "";
-            std::time_t t = static_cast<std::time_t>(epoch);
-            std::tm tm{};
-            localtime_r(&t, &tm);
-
-            char buffer[64];
-            // xgettext:no-c-format
-            std::strftime(buffer, sizeof(buffer), _("%H:%M"), &tm);
-            return buffer;
-        }
-
         void request_threads() {
             nlohmann::json j;
             j["command"] = "bt_list_threads";
@@ -220,6 +207,7 @@ namespace tether::ui {
 
             GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
             gtk_container_set_border_width(GTK_CONTAINER(box), 10);
+            gtk_box_pack_start(GTK_BOX(box), avatar(name), FALSE, FALSE, 0);
 
             GtkWidget* labels = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
 
@@ -294,7 +282,7 @@ namespace tether::ui {
             const bool outgoing = message.value("outgoing", false);
             const std::string body = message.value("body", "");
             const std::string stamp =
-                show_stamp ? format_timestamp(message.value("timestamp", static_cast<int64_t>(0))) : "";
+                show_stamp ? format_clock(message.value("timestamp", static_cast<int64_t>(0))) : "";
 
             GtkWidget* row = gtk_list_box_row_new();
             gtk_list_box_row_set_selectable(GTK_LIST_BOX_ROW(row), FALSE);
@@ -1059,6 +1047,7 @@ namespace tether::ui {
         g_messages.banner_label = gtk_label_new(nullptr);
         gtk_label_set_xalign(GTK_LABEL(g_messages.banner_label), 0.0);
         gtk_label_set_line_wrap(GTK_LABEL(g_messages.banner_label), TRUE);
+        gtk_label_set_line_wrap_mode(GTK_LABEL(g_messages.banner_label), PANGO_WRAP_WORD_CHAR);
         gtk_box_pack_start(GTK_BOX(g_messages.banner), g_messages.banner_label, TRUE, TRUE, 0);
 
         g_messages.banner_action = gtk_button_new_with_label(_("Show iPhone Permissions"));
@@ -1073,14 +1062,15 @@ namespace tether::ui {
 
         GtkWidget* paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
         g_messages.paned = paned;
-        gtk_paned_set_position(GTK_PANED(paned), prefs().value("sidebar_width", 260));
+        gtk_paned_set_position(GTK_PANED(paned), prefs().value("sidebar_width", 300));
         gtk_box_pack_start(GTK_BOX(root), paned, TRUE, TRUE, 0);
 
         GtkWidget* thread_scroll = gtk_scrolled_window_new(nullptr, nullptr);
         g_messages.thread_scroll = thread_scroll;
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(thread_scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-        gtk_widget_set_size_request(thread_scroll, 240, -1);
+        gtk_widget_set_size_request(thread_scroll, 270, -1);
         g_messages.thread_list = gtk_list_box_new();
+        gtk_style_context_add_class(gtk_widget_get_style_context(g_messages.thread_list), "tether-list");
         g_messages.thread_selected_handler =
             g_signal_connect(g_messages.thread_list, "row-selected", G_CALLBACK(on_thread_selected), nullptr);
         g_signal_connect(g_messages.thread_list, "row-activated", G_CALLBACK(on_thread_activated), nullptr);
@@ -1088,6 +1078,8 @@ namespace tether::ui {
         gtk_container_add(GTK_CONTAINER(thread_scroll), g_messages.thread_list);
 
         GtkWidget* thread_side = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+        style(thread_side, "tether-thread-pane");
+        gtk_box_pack_start(GTK_BOX(thread_side), page_header(_("Messages"), "messages"), FALSE, FALSE, 0);
 
         g_messages.search_entry = gtk_search_entry_new();
         gtk_entry_set_placeholder_text(GTK_ENTRY(g_messages.search_entry), _("Search conversations"));
@@ -1112,6 +1104,7 @@ namespace tether::ui {
         gtk_button_set_image(GTK_BUTTON(new_message),
                              gtk_image_new_from_icon_name("list-add-symbolic", GTK_ICON_SIZE_BUTTON));
         gtk_button_set_always_show_image(GTK_BUTTON(new_message), TRUE);
+        style(new_message, "suggested-action");
         gtk_widget_set_margin_top(new_message, 8);
         gtk_widget_set_margin_bottom(new_message, 8);
         gtk_widget_set_margin_start(new_message, 8);
@@ -1125,8 +1118,10 @@ namespace tether::ui {
 
         GtkWidget* placeholder = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
         gtk_widget_set_valign(placeholder, GTK_ALIGN_CENTER);
+        style(placeholder, "tether-empty");
         gtk_widget_set_halign(placeholder, GTK_ALIGN_CENTER);
         g_messages.placeholder_icon = gtk_image_new_from_icon_name("mail-unread-symbolic", GTK_ICON_SIZE_DIALOG);
+        style(g_messages.placeholder_icon, "tether-hero-icon");
         gtk_box_pack_start(GTK_BOX(placeholder), g_messages.placeholder_icon, FALSE, FALSE, 0);
         g_messages.placeholder_label = gtk_label_new(_("Select a conversation"));
         gtk_style_context_add_class(gtk_widget_get_style_context(g_messages.placeholder_label), "muted");
@@ -1173,6 +1168,8 @@ namespace tether::ui {
         gtk_widget_set_no_show_all(g_messages.compose_bar, TRUE);
 
         GtkWidget* conversation_header_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        gtk_style_context_add_class(gtk_widget_get_style_context(conversation_header_box),
+                                    "tether-conversation-header");
         gtk_container_set_border_width(GTK_CONTAINER(conversation_header_box), 10);
         g_messages.conversation_header = gtk_label_new(nullptr);
         gtk_label_set_xalign(GTK_LABEL(g_messages.conversation_header), 0.0);
@@ -1185,6 +1182,7 @@ namespace tether::ui {
         gtk_scrolled_window_set_policy(
             GTK_SCROLLED_WINDOW(g_messages.conversation_scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
         g_messages.conversation = gtk_list_box_new();
+        gtk_style_context_add_class(gtk_widget_get_style_context(g_messages.conversation), "tether-conversation");
         gtk_list_box_set_selection_mode(GTK_LIST_BOX(g_messages.conversation), GTK_SELECTION_NONE);
         gtk_container_add(GTK_CONTAINER(g_messages.conversation_scroll), g_messages.conversation);
         if (GtkAdjustment* adjustment = conversation_adjustment()) {
@@ -1194,6 +1192,7 @@ namespace tether::ui {
         gtk_box_pack_start(GTK_BOX(conversation_box), g_messages.conversation_scroll, TRUE, TRUE, 0);
 
         GtkWidget* composer_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        gtk_style_context_add_class(gtk_widget_get_style_context(composer_box), "tether-composer");
         gtk_container_set_border_width(GTK_CONTAINER(composer_box), 8);
         g_messages.composer = gtk_text_view_new();
         set_accessible_name(g_messages.composer, _("Message"));
@@ -1209,7 +1208,7 @@ namespace tether::ui {
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(composer_frame), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
         // Without a border the box floats in the panel with nothing marking it as
         // somewhere to type.
-        gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(composer_frame), GTK_SHADOW_IN);
+        gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(composer_frame), GTK_SHADOW_NONE);
         gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(composer_frame), 140);
         gtk_container_add(GTK_CONTAINER(composer_frame), g_messages.composer);
         gtk_box_pack_start(GTK_BOX(composer_box), composer_frame, TRUE, TRUE, 0);
@@ -1245,6 +1244,7 @@ namespace tether::ui {
         g_messages.send_error_label = gtk_label_new(nullptr);
         gtk_label_set_xalign(GTK_LABEL(g_messages.send_error_label), 0.0);
         gtk_label_set_line_wrap(GTK_LABEL(g_messages.send_error_label), TRUE);
+        gtk_label_set_line_wrap_mode(GTK_LABEL(g_messages.send_error_label), PANGO_WRAP_WORD_CHAR);
         gtk_box_pack_start(GTK_BOX(g_messages.send_error), g_messages.send_error_label, TRUE, TRUE, 0);
         GtkWidget* retry = gtk_button_new_with_label(_("Retry"));
         gtk_widget_set_valign(retry, GTK_ALIGN_CENTER);
