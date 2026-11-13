@@ -403,6 +403,7 @@ namespace tether {
                                        "bluetooth.pairing",
                                        "contacts",
                                        "files",
+                                       "files.send.target",
                                        "messages",
                                        "notifications",
                                        "otp",

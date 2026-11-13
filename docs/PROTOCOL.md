@@ -20,8 +20,12 @@ and sends the same event to local subscribers. Version 1 supports optional
 `calls` is advertised only while calls are enabled and BlueZ is running, and
 `clipboard` only when the host compositor offers clipboard access. Other
 features have separate status and permission events, so a capability is not a
-promise that a phone is connected or has granted permissions. Older clients may
-ignore this message.
+promise that a phone is connected or has granted permissions. `files.send.target`
+means the local `send_file` command accepts a nonempty `target` fingerprint and
+routes the transfer only to that connected peer, failing if it is not connected.
+Without this marker, clients must not assume `target` is honored: older daemons
+may ignore it and broadcast the file. The marker does not guarantee delivery to
+the phone, only daemon-side routing. Older clients may ignore this message.
 
 ---
 

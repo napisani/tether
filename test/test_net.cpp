@@ -561,6 +561,13 @@ namespace {
                   tether::g_wayland && tether::g_wayland->clipboard_available());
     }
 
+    TEST(ControlProtocolTest, AdvertisesTargetedFileSendWithoutChangingProtocolVersion) {
+        const auto info = tether::build_protocol_info();
+        EXPECT_EQ(info.value("version", 0), 1);
+        const auto& capabilities = info.at("capabilities");
+        EXPECT_NE(std::find(capabilities.begin(), capabilities.end(), "files.send.target"), capabilities.end());
+    }
+
     TEST(ClientTest, ConnectsToAnIpv6Literal) {
         const std::string home = unique_test_dir("tether_client_v6_test");
         CleanupGuard cleanup_guard(home);
